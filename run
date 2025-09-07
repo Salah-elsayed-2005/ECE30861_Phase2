@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+
+set -e
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: ./run install | ./run test | ./run /absolute/path/to/url_file"
+  exit 1
+fi
+
+case "$1" in
+  install)
+    echo "[stub] Installing dependencies..."
+    # later: pip install --user -r requirements.txt
+    exit 0
+    ;;
+  test)
+    echo "[stub] Running test suite..."
+    # later: pytest with coverage
+    exit 0
+    ;;
+  /*) # absolute path assumed = URL_FILE
+    echo "Running CLIApp(file)..."
+    # later: pip install --user -r requirements.txt
+    exit 0
+    ;;
+  *)
+    echo "Error: unrecognized command '$1'"
+    echo "Usage: ./run install | ./run test | ./run /absolute/path/to/url_file"
+    exit 1
+    ;;
+esac
