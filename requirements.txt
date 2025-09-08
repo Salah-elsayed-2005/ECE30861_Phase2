@@ -1,0 +1,4 @@
+requests
+groq
+pytest-cov
+flake8
