@@ -10,17 +10,23 @@ import requests
 
 class Client(ABC):
     """
-    Abstract client that enforces a rate-limit check before sending requests.
+    Abstract client that enforces a rate-limit check before sending
+    requests.
+
     Subclasses must implement:
-      - can_send(): bool
-      - _send(...): Any
+      - ``can_send() -> bool``
+      - ``_send(...): Any``
     """
 
     @abstractmethod
     def can_send(self) -> bool:
         """
-        Return True if a request is allowed right now (respecting rate limit).
-        Return False otherwise.
+        Return whether a request is currently allowed.
+
+        Returns
+        -------
+        bool
+            True if allowed (rate limit respected), False otherwise.
         """
         ...
 
@@ -28,13 +34,27 @@ class Client(ABC):
     def _send(self, *args: Any, **kwargs: Any) -> Any:
         """
         Do the actual request (HTTP, API call, etc.).
+
+        Returns
+        -------
+        Any
+            Response payload (implementation-defined by subclass).
         """
         ...
 
     def request(self, *args: Any, **kwargs: Any) -> Any:
         """
-        Public entrypoint: always check can_send() first,
-                        then delegate to _send().
+        Public entrypoint: check ``can_send()`` then delegate to ``_send()``.
+
+        Returns
+        -------
+        Any
+            Whatever ``_send(...)`` returns.
+
+        Raises
+        ------
+        RuntimeError
+            If the rate limit is exceeded.
         """
         if not self.can_send():
             msg = "Rate limit exceeded: request not allowed right now."
@@ -44,7 +64,7 @@ class Client(ABC):
 
 class GrokClient(Client):
     """
-    Client object for Grok API that implements rate limiting
+    Client for the Grok API that implements rate limiting.
     """
     # Shared, process-local state
     _lock = threading.Lock()
@@ -65,9 +85,12 @@ class GrokClient(Client):
 
     def can_send(self) -> bool:
         """
-        Determines whether or not we have hit our limit and number of requests.
-        We keep of track of number of requests within the window using the
-        GrokClient.request_history object.
+        Determine whether the request limit has been reached.
+
+        Returns
+        -------
+        bool
+            True if a request is allowed; False otherwise.
         """
         # Get current time for the window
         now = time.monotonic()
@@ -90,8 +113,28 @@ class GrokClient(Client):
         """
         Perform an HTTP request to Grok’s API.
 
-        Example:
-            client.request("GET", "/models", params={"limit": 5})
+        Parameters
+        ----------
+        method : str
+            HTTP method (e.g., "GET", "POST").
+        path : str
+            API path starting with "/".
+        **kwargs : Any
+            Additional keyword arguments passed to ``requests.request``.
+
+        Returns
+        -------
+        Any
+            Parsed JSON when possible, otherwise response text.
+
+        Raises
+        ------
+        RuntimeError
+            If the request fails or the response is not OK.
+
+        Examples
+        --------
+        >>> client.request("GET", "/models", params={"limit": 5})
         """
         url = f"{self.base_url}{path}"
         headers = {"Authorization": f"Bearer {self.token}"}
@@ -116,7 +159,17 @@ class GrokClient(Client):
 
     def llm(self, message: str) -> str:
         """
-        Runs llama-3.1-8b-instant LLM on input
+        Run the ``llama-3.1-8b-instant`` model on the given input.
+
+        Parameters
+        ----------
+        message : str
+            User message for the chat completion API.
+
+        Returns
+        -------
+        str
+            LLM response from the Grok API.
         """
         completion = self.request(
             "POST",
