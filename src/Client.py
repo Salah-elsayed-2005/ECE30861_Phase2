@@ -1,9 +1,12 @@
 # src/Client.py
-from abc import ABC, abstractmethod
-from typing import Any
-import requests
-from collections import deque
+import threading
 import time
+from abc import ABC, abstractmethod
+from collections import deque
+from typing import Any, Deque
+
+import requests
+
 
 class Client(ABC):
     """
@@ -30,17 +33,30 @@ class Client(ABC):
 
     def request(self, *args: Any, **kwargs: Any) -> Any:
         """
-        Public entrypoint: always check can_send() first, then delegate to _send().
+        Public entrypoint: always check can_send() first,
+                        then delegate to _send().
         """
         if not self.can_send():
-            raise RuntimeError("Rate limit exceeded: request not allowed right now.")
+            msg = "Rate limit exceeded: request not allowed right now."
+            raise RuntimeError(msg)
         return self._send(*args, **kwargs)
-    
+
 
 class GrokClient(Client):
-    request_history = deque() # Will keep track of requests done accross all instances of this object
+    """
+    Client object for Grok API that implements rate limiting
+    """
+    # Shared, process-local state
+    _lock = threading.Lock()
+    request_history: Deque[float] = deque()   # shared across all instances
 
-    def __init__(self, max_requests: int, token: str, base_url: str = "https://api.groq.com/openai/v1", window_seconds: float = 60.0) -> None:
+    # ^ Will keep track of requests done accross all instances of this object
+
+    def __init__(self,
+                 max_requests: int,
+                 token: str,
+                 base_url: str = "https://api.groq.com/openai/v1",
+                 window_seconds: float = 60.0) -> None:
         super().__init__()
         self.max_requests = max_requests
         self.window_seconds = window_seconds
@@ -49,21 +65,25 @@ class GrokClient(Client):
 
     def can_send(self) -> bool:
         """
-        Determines whether or not we have hit our limit and number of requests. We keep of track
-        of number of requests within the window using the GrokClient.request_history object 
+        Determines whether or not we have hit our limit and number of requests.
+        We keep of track of number of requests within the window using the
+        GrokClient.request_history object.
         """
         # Get current time for the window
         now = time.monotonic()
         cutoff = now - self.window_seconds
 
-        # Remove any requests from before the window
-        while GrokClient.request_history and GrokClient.request_history[0] <= cutoff:
-            GrokClient.request_history.popleft()
+        # Use the lock to avoid accessing same memory during multiprocessing
+        with GrokClient._lock:
+            # Remove any requests from before the window
+            hist = GrokClient.request_history
+            while hist and hist[0] <= cutoff:
+                hist.popleft()
 
-        # If we can still make the request, we keep going
-        if len(GrokClient.request_history) < self.max_requests:
-            GrokClient.request_history.append(now)
-            return True
+            # If we can still make the request, we keep going
+            if len(GrokClient.request_history) < self.max_requests:
+                GrokClient.request_history.append(now)
+                return True
         return False
 
     def _send(self, method: str, path: str, **kwargs: Any) -> Any:
@@ -76,19 +96,24 @@ class GrokClient(Client):
         url = f"{self.base_url}{path}"
         headers = {"Authorization": f"Bearer {self.token}"}
         try:
-            resp = requests.request(method=method, url=url, headers=headers, timeout=15, **kwargs)
+            resp = requests.request(method=method,
+                                    url=url,
+                                    headers=headers,
+                                    timeout=15,
+                                    **kwargs)
         except requests.RequestException as e:
             raise RuntimeError(f"Grok API request failed: {e}") from e
 
         if not resp.ok:
-            raise RuntimeError(f"Grok API error {resp.status_code}: {resp.text}")
+            msg = f"Grok API error {resp.status_code}: {resp.text}"
+            raise RuntimeError(msg)
 
         # Try to parse JSON, else return text
         try:
             return resp.json()
         except ValueError:
             return resp.text
-        
+
     def llm(self, message: str) -> str:
         """
         Runs llama-3.1-8b-instant LLM on input
