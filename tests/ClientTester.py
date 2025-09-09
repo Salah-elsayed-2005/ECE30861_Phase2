@@ -1,7 +1,11 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from src.Client import Client, GrokClient
+from src.Client import Client, GrokClient, HFClient
+
+'''
+CLIENT TESTS
+'''
 
 
 class TestRateLimiting(unittest.TestCase):
@@ -33,8 +37,9 @@ class TestRateLimiting(unittest.TestCase):
             self.client.request()  # This should error (n_reqs: 1 -> 0)
 
 
-if __name__ == '__main__':
-    unittest.main()
+'''
+GROK TESTS
+'''
 
 
 class TestGrokClientRateLimit(unittest.TestCase):
@@ -138,3 +143,104 @@ class TestGrokClientSendAndLLM(unittest.TestCase):
         payload = kwargs.get("json")
         self.assertIsNotNone(payload)
         self.assertEqual(payload["messages"][0]["content"], "hey there")
+
+
+'''
+HF TESTS
+'''
+
+
+class TestHFClientRateLimit(unittest.TestCase):
+    def setUp(self) -> None:
+        HFClient.request_history.clear()
+
+    def tearDown(self) -> None:
+        HFClient.request_history.clear()
+
+    def test_global_rate_limit_window(self) -> None:
+        client = HFClient(max_requests=2, token="t", window_seconds=10.0)
+
+        with patch("time.monotonic", side_effect=[100.0, 100.0, 100.0, 111.0]):
+            self.assertTrue(client.can_send())
+            self.assertTrue(client.can_send())
+            self.assertFalse(client.can_send())
+            self.assertTrue(client.can_send())
+
+
+class TestHFClientSend(unittest.TestCase):
+    def setUp(self) -> None:
+        HFClient.request_history.clear()
+
+    def tearDown(self) -> None:
+        HFClient.request_history.clear()
+
+    @patch.object(HFClient, "can_send", return_value=True)
+    @patch("requests.request")
+    def test__send_json_success(self,
+                                mock_req: MagicMock,
+                                _mock_can: MagicMock) -> None:
+        client = HFClient(max_requests=3,
+                          token="hf_abc",
+                          base_url="https://example.test")
+
+        resp = MagicMock()
+        resp.ok = True
+        resp.json.return_value = {"ok": True}
+        mock_req.return_value = resp
+
+        out = client._send("GET", "/api/models/bert-base-cased")
+        self.assertEqual(out, {"ok": True})
+
+        # Verify URL and Authorization header
+        _, kwargs = mock_req.call_args
+        self.assertEqual(kwargs["url"],
+                         "https://example.test/api/models/bert-base-cased")
+        self.assertIn("Authorization", kwargs["headers"])
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer hf_abc")
+
+    @patch.object(HFClient, "can_send", return_value=True)
+    @patch("requests.request")
+    def test__send_text_fallback(self,
+                                 mock_req: MagicMock,
+                                 _mock_can: MagicMock) -> None:
+        client = HFClient(max_requests=3, token="hf_abc")
+
+        resp = MagicMock()
+        resp.ok = True
+        resp.json.side_effect = ValueError("not json")
+        resp.text = "plain text"
+        mock_req.return_value = resp
+
+        out = client._send("GET", "/api/spaces")
+        self.assertEqual(out, "plain text")
+
+    @patch.object(HFClient, "can_send", return_value=True)
+    @patch("requests.request")
+    def test__send_error_status(self,
+                                mock_req: MagicMock,
+                                _mock_can: MagicMock) -> None:
+        client = HFClient(max_requests=3, token="hf_abc")
+
+        resp = MagicMock()
+        resp.ok = False
+        resp.status_code = 403
+        resp.text = "Forbidden"
+        mock_req.return_value = resp
+
+        with self.assertRaises(RuntimeError) as ctx:
+            client._send("GET", "/api/spaces")
+        self.assertIn("403", str(ctx.exception))
+
+    @patch.object(HFClient, "can_send", return_value=True)
+    @patch("requests.request", side_effect=Exception("boom"))
+    def test__send_request_exception(self,
+                                     _mock_req: MagicMock,
+                                     _mock_can: MagicMock) -> None:
+        client = HFClient(max_requests=3, token="hf_abc")
+        with self.assertRaises(RuntimeError) as ctx:
+            client._send("GET", "/api/spaces")
+        self.assertIn("HF API request failed", str(ctx.exception))
+
+
+if __name__ == '__main__':
+    unittest.main()
