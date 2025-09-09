@@ -64,7 +64,15 @@ class Client(ABC):
 
 class GrokClient(Client):
     """
-    Client for the Grok API that implements rate limiting.
+    Client for the Groq API that implements a per-class (process-local)
+    rate limit shared across all instances.
+
+    Notes
+    -----
+    - The limiter is global to the class: all instances share the same
+      window and request counter via ``request_history``.
+    - A request is counted when it is allowed (during ``can_send``), even
+      if the subsequent network call fails.
     """
     # Shared, process-local state
     _lock = threading.Lock()
@@ -159,7 +167,8 @@ class GrokClient(Client):
 
     def llm(self, message: str) -> str:
         """
-        Run the ``llama-3.1-8b-instant`` model on the given input.
+        Run the ``llama-3.1-8b-instant`` model on the given input and
+        return the assistant's response text.
 
         Parameters
         ----------
@@ -169,17 +178,22 @@ class GrokClient(Client):
         Returns
         -------
         str
-            LLM response from the Grok API.
+            Assistant message content from the Groq API response.
         """
         completion = self.request(
             "POST",
             "/chat/completions",
             json={
                 "model": "llama-3.1-8b-instant",
-                "messages": [{"role": "user", "content": "Hello Grok!"}],
+                "messages": [{"role": "user", "content": message}],
             },
         )
-        return completion
+
+        # Extract from OpenAI-compatible schema: choices[0].message.content
+        try:
+            return completion["choices"][0]["message"]["content"]
+        except Exception as e:  # pragma: no cover - defensive parsing
+            raise RuntimeError("Unexpected Groq API response format") from e
 
 
 if __name__ == "__main__":

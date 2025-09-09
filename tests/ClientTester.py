@@ -1,6 +1,7 @@
 import unittest
+from unittest.mock import MagicMock, patch
 
-from src.Client import Client
+from src.Client import Client, GrokClient
 
 
 class TestRateLimiting(unittest.TestCase):
@@ -34,3 +35,106 @@ class TestRateLimiting(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestGrokClientRateLimit(unittest.TestCase):
+    def setUp(self) -> None:
+        # Ensure clean slate for the shared history
+        GrokClient.request_history.clear()
+
+    def tearDown(self) -> None:
+        GrokClient.request_history.clear()
+
+    def test_global_rate_limit_window(self) -> None:
+        client = GrokClient(max_requests=2, token="t", window_seconds=10.0)
+
+        with patch("time.monotonic", side_effect=[100.0, 100.0, 100.0, 111.0]):
+            # First two allowed
+            self.assertTrue(client.can_send())
+            self.assertTrue(client.can_send())
+            # Third within the same timestamp denied
+            self.assertFalse(client.can_send())
+            # Advance beyond window; old timestamps expire
+            self.assertTrue(client.can_send())
+
+
+class TestGrokClientSendAndLLM(unittest.TestCase):
+    def setUp(self) -> None:
+        GrokClient.request_history.clear()
+
+    def tearDown(self) -> None:
+        GrokClient.request_history.clear()
+
+    @patch.object(GrokClient, "can_send", return_value=True)
+    @patch("requests.request")
+    def test__send_json_success(self,
+                                mock_req: MagicMock,
+                                _mock_can: MagicMock) -> None:
+        client = GrokClient(max_requests=3, token="abc")
+
+        resp = MagicMock()
+        resp.ok = True
+        resp.json.return_value = {"hello": "world"}
+        mock_req.return_value = resp
+
+        out = client._send("GET", "/status")
+        self.assertEqual(out, {"hello": "world"})
+
+    @patch.object(GrokClient, "can_send", return_value=True)
+    @patch("requests.request")
+    def test__send_text_fallback(self,
+                                 mock_req: MagicMock,
+                                 _mock_can: MagicMock) -> None:
+        client = GrokClient(max_requests=3, token="abc")
+
+        resp = MagicMock()
+        resp.ok = True
+        resp.json.side_effect = ValueError("not json")
+        resp.text = "plain text"
+        mock_req.return_value = resp
+
+        out = client._send("GET", "/status")
+        self.assertEqual(out, "plain text")
+
+    @patch.object(GrokClient, "can_send", return_value=True)
+    @patch("requests.request")
+    def test__send_error_status(self,
+                                mock_req: MagicMock,
+                                _mock_can: MagicMock) -> None:
+        client = GrokClient(max_requests=3, token="abc")
+
+        resp = MagicMock()
+        resp.ok = False
+        resp.status_code = 400
+        resp.text = "Bad Request"
+        mock_req.return_value = resp
+
+        with self.assertRaises(RuntimeError) as ctx:
+            client._send("POST", "/do")
+        self.assertIn("400", str(ctx.exception))
+
+    @patch.object(GrokClient, "can_send", return_value=True)
+    @patch("requests.request")
+    def test_llm_uses_message_and_parses_text(self,
+                                              mock_req: MagicMock,
+                                              _mock_can: MagicMock) -> None:
+        client = GrokClient(max_requests=3, token="abc")
+
+        completion = {
+            "choices": [
+                {"message": {"content": "Hello back"}}
+            ]
+        }
+        resp = MagicMock()
+        resp.ok = True
+        resp.json.return_value = completion
+        mock_req.return_value = resp
+
+        reply = client.llm("hey there")
+        self.assertEqual(reply, "Hello back")
+
+        # Verify the payload included our message
+        args, kwargs = mock_req.call_args
+        payload = kwargs.get("json")
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["messages"][0]["content"], "hey there")
