@@ -196,6 +196,111 @@ class GrokClient(Client):
             raise RuntimeError("Unexpected Groq API response format") from e
 
 
+class HFClient(Client):
+    """
+    Client for the Huggingface API that implements a per-class (process-local)
+    rate limit shared across all instances.
+
+    Notes
+    -----
+    - The limiter is global to the class: all instances share the same
+      window and request counter via ``request_history``.
+    - A request is counted when it is allowed (during ``can_send``), even
+      if the subsequent network call fails.
+    """
+    # Shared, process-local state
+    _lock = threading.Lock()
+    request_history: Deque[float] = deque()   # shared across all instances
+
+    # ^ Will keep track of requests done accross all instances of this object
+
+    def __init__(self,
+                 max_requests: int,
+                 token: str,
+                 base_url: str = "https://huggingface.co",
+                 window_seconds: float = 60.0) -> None:
+        super().__init__()
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.base_url = base_url
+        self.token = token
+
+    def can_send(self) -> bool:
+        """
+        Determine whether the request limit has been reached.
+
+        Returns
+        -------
+        bool
+            True if a request is allowed; False otherwise.
+        """
+        # Get current time for the window
+        now = time.monotonic()
+        cutoff = now - self.window_seconds
+
+        # Use the lock to avoid accessing same memory during multiprocessing
+        with HFClient._lock:
+            # Remove any requests from before the window
+            hist = HFClient.request_history
+            while hist and hist[0] <= cutoff:
+                hist.popleft()
+
+            # If we can still make the request, we keep going
+            if len(HFClient.request_history) < self.max_requests:
+                HFClient.request_history.append(now)
+                return True
+        return False
+
+    def _send(self, method: str, path: str, **kwargs: Any) -> Any:
+        """
+        Perform an HTTP request to HF's API.
+
+        Parameters
+        ----------
+        method : str
+            HTTP method (e.g., "GET", "POST").
+        path : str
+            API path starting with "/".
+        **kwargs : Any
+            Additional keyword arguments passed to ``requests.request``.
+
+        Returns
+        -------
+        Any
+            Parsed JSON when possible, otherwise response text.
+
+        Raises
+        ------
+        RuntimeError
+            If the request fails or the response is not OK.
+
+        Examples
+        --------
+        >>> client.request("GET", "/api/spaces", params={"limit": 5})
+        >>> client.request("GET", f"/api/models/{repo_id}")['cardData']
+        """
+        url = f"{self.base_url}{path}"
+        headers = {"Authorization": f"Bearer {self.token}"}
+        try:
+            resp = requests.request(method=method,
+                                    url=url,
+                                    headers=headers,
+                                    timeout=15,
+                                    **kwargs)
+        except requests.RequestException as e:
+            raise RuntimeError(f"HF API request failed: {e}") from e
+
+        if not resp.ok:
+            msg = f"HF API error {resp.status_code}: {resp.text}"
+            raise RuntimeError(msg)
+
+        # Try to parse JSON, else return text
+        try:
+            return resp.json()
+        except ValueError:
+            return resp.text
+
+
 if __name__ == "__main__":
 
     grok = GrokClient(max_requests=3, token="Placeholder")
