@@ -2,10 +2,9 @@
 # THIS CODE WILL HANDLE THE METRIC OBJECTS
 from __future__ import annotations
 
-import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Protocol
+from typing import Any, Mapping, Optional
 
 
 @dataclass(frozen=True)
@@ -20,13 +19,14 @@ class MetricResult:
     key : str
         Stable identifier/slug for the metric (e.g., "license").
     value : Any
-        The primary result produced by the metric (bool, number, str, dict, etc.).
+        The primary result produced by the metric (bool, str, dict, etc.).
     latency_ms : float
         How long the metric took to execute (milliseconds).
     details : Optional[Mapping[str, Any]]
         Optional extra information for display or debugging.
     error : Optional[str]
-        If the metric failed, put a concise error message here and set `value` as appropriate.
+        If the metric failed, put a concise error message here
+        and set `value` as appropriate.
     """
     metric: str
     key: str
@@ -42,7 +42,6 @@ class Metric(ABC):
 
     Subclasses must implement ``compute()`` to perform the actual work.
     """
-
 
     @abstractmethod
     def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
