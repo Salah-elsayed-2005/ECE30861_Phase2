@@ -37,13 +37,14 @@ class Parser:
         self.urls: List[str] = self._loadUrls()
         self.regex_dict: Dict[str, re.Pattern] = {
             "dataset_url": re.compile(
-                r"https?://huggingface\.co/datasets/[A-Za-z0-9_.-]\
-                +(/[\w\-\.]+)?"),
+                r"https?://huggingface\.co/datasets/"
+                r"[A-Za-z0-9_.-]+(/[\w\-\.]+)?"),
             "model_url": re.compile(
-                r"https?://huggingface\.co/(?!datasets/)[A-Za-z0-9_.-]\
-                +(/[\w\-\.]+)?"),
+                r"https?://huggingface\.co/(?!datasets/)"
+                r"[A-Za-z0-9_.-]+(/[\w\-\.]+)?"),
             "git_url": re.compile(
-                r"https?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"),
+                r"https?://github\.com/"
+                r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"),
         }
         self.groups: Dict[str, List[str]] = self._categorize()
 
