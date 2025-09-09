@@ -15,7 +15,7 @@ case "$1" in
   test)
     echo "[stub] Running test suite..."
     # later: pytest with coverage
-    pytest --cov=src
+    pytest --cov=src tests/*
     exit 0
     ;;
   *) # absolute path assumed = URL_FILE
