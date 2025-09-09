@@ -4,3 +4,4 @@ pytest-cov
 flake8
 mypy
 types-requests
+python-dotenv

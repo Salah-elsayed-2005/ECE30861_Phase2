@@ -1,11 +1,15 @@
 # src/Client.py
+import os
 import threading
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Any, Deque
+from typing import Any, Deque, Optional
 
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()  # Load keys from .env file
 
 
 class Client(ABC):
@@ -82,13 +86,22 @@ class GrokClient(Client):
 
     def __init__(self,
                  max_requests: int,
-                 token: str,
+                 token: Optional[str] = None,
                  base_url: str = "https://api.groq.com/openai/v1",
                  window_seconds: float = 60.0) -> None:
         super().__init__()
         self.max_requests = max_requests
         self.window_seconds = window_seconds
-        self.token = token
+        # Prefer explicit token; otherwise fall back to env var
+        if token is None:
+            env_token = os.getenv("GROQ_API_KEY")
+            if not env_token:
+                raise ValueError(
+                    "Missing Groq token: set GROQ_API_KEY or pass token"
+                )
+            self.token = env_token
+        else:
+            self.token = token
         self.base_url = base_url
 
     def can_send(self) -> bool:
@@ -216,14 +229,23 @@ class HFClient(Client):
 
     def __init__(self,
                  max_requests: int,
-                 token: str,
+                 token: Optional[str] = None,
                  base_url: str = "https://huggingface.co",
                  window_seconds: float = 60.0) -> None:
         super().__init__()
         self.max_requests = max_requests
         self.window_seconds = window_seconds
         self.base_url = base_url
-        self.token = token
+        # Prefer explicit token; otherwise fall back to env var
+        if token is None:
+            env_token = os.getenv("HF_TOKEN")
+            if not env_token:
+                raise ValueError(
+                    "Missing HF token: set HF_TOKEN or pass token"
+                )
+            self.token = env_token
+        else:
+            self.token = token
 
     def can_send(self) -> bool:
         """
