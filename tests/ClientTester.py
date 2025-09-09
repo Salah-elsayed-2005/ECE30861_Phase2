@@ -1,5 +1,6 @@
 import unittest
 from unittest.mock import MagicMock, patch
+import requests
 
 from src.Client import Client, GrokClient, HFClient
 
@@ -232,7 +233,7 @@ class TestHFClientSend(unittest.TestCase):
         self.assertIn("403", str(ctx.exception))
 
     @patch.object(HFClient, "can_send", return_value=True)
-    @patch("requests.request", side_effect=Exception("boom"))
+    @patch("requests.request", side_effect=requests.RequestException("boom"))
     def test__send_request_exception(self,
                                      _mock_req: MagicMock,
                                      _mock_can: MagicMock) -> None:
