@@ -1,18 +1,11 @@
 # src/Client.py
 import os
-<<<<<<< HEAD
 import subprocess
-=======
->>>>>>> e438fa65c1bb03e51bd1228e2a3155f811585ca2
 import threading
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-<<<<<<< HEAD
-from typing import Any, Deque, List
-=======
-from typing import Any, Deque, Optional
->>>>>>> e438fa65c1bb03e51bd1228e2a3155f811585ca2
+from typing import Any, Deque, List, Optional
 
 import requests
 from dotenv import load_dotenv
