@@ -1,6 +1,7 @@
 import unittest
 import os
 from unittest.mock import MagicMock, patch
+
 import requests
 
 from src.Client import Client, GrokClient, HFClient
