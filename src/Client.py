@@ -1,9 +1,11 @@
 # src/Client.py
+import os
+import subprocess
 import threading
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Any, Deque
+from typing import Any, Deque, List
 
 import requests
 
@@ -299,6 +301,123 @@ class HFClient(Client):
             return resp.json()
         except ValueError:
             return resp.text
+
+
+class GitClient(Client):
+    """
+    Client for interacting with a local Git repository using the `git`
+    command-line. Implements a per-class (process-local) rate limit shared
+    across all instances, matching the style of other clients.
+
+    Notes
+    -----
+    - The limiter is global to the class: all instances share the same
+      window and request counter via ``request_history``.
+    - A request is counted when it is allowed (during ``can_send``), even
+      if the subsequent command fails.
+    """
+    # Shared, process-local state
+    _lock = threading.Lock()
+    request_history: Deque[float] = deque()  # shared across all instances
+
+    # ^ Will keep track of requests done accross all instances of this object
+
+    def __init__(self,
+                 max_requests: int,
+                 repo_path: str = ".",
+                 window_seconds: float = 60.0) -> None:
+        super().__init__()
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        # Normalize path but do not validate at construction time
+        # to ease testing
+        self.repo_path = os.fspath(repo_path)
+
+    def can_send(self) -> bool:
+        """
+        Determine whether the request limit has been reached.
+
+        Returns
+        -------
+        bool
+            True if a request is allowed; False otherwise.
+        """
+        now = time.monotonic()
+        cutoff = now - self.window_seconds
+
+        with GitClient._lock:
+            hist = GitClient.request_history
+            while hist and hist[0] <= cutoff:
+                hist.popleft()
+
+            if len(GitClient.request_history) < self.max_requests:
+                GitClient.request_history.append(now)
+                return True
+        return False
+
+    def _send(self, *git_args: str) -> str:
+        """
+        Execute a git command in the configured repository path.
+
+        Parameters
+        ----------
+        *git_args : str
+            Arguments to pass to the `git` binary,
+            e.g., ("status", "--porcelain").
+
+        Returns
+        -------
+        str
+            Standard output from the command (stripped of trailing whitespace).
+
+        Raises
+        ------
+        RuntimeError
+            If the command fails (non-zero return code) or cannot be executed.
+
+        Examples
+        --------
+        >>> client = GitClient(max_requests=3, repo_path=".")
+        >>> client.request("status", "--porcelain")
+        """
+        cmd = ["git", *git_args]
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            raise RuntimeError(f"Git command failed to run: {e}") from e
+
+        if proc.returncode != 0:
+            err = proc.stderr.strip() or "unknown git error"
+            raise RuntimeError(f"Git command error {proc.returncode}: {err}")
+
+        return (proc.stdout or "").rstrip("\n")
+
+    def list_files(self) -> List[str]:
+        """
+        List tracked files under the repository using `git ls-files`.
+
+        Returns
+        -------
+        list[str]
+            File paths relative to repository root.
+
+        Examples
+        --------
+        >>> client = GitClient(max_requests=3, repo_path=".")
+        >>> client.list_files()  # doctest: +SKIP
+        ["src/main.py", "README.md", ...]
+        """
+        out = self.request("ls-files")
+        if not out:
+            return []
+        return out.splitlines()
 
 
 if __name__ == "__main__":

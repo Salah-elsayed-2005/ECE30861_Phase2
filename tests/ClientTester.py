@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 import requests
 
-from src.Client import Client, GrokClient, HFClient
+from src.Client import Client, GrokClient, HFClient, GitClient
 
 '''
 CLIENT TESTS
@@ -241,6 +241,92 @@ class TestHFClientSend(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             client._send("GET", "/api/spaces")
         self.assertIn("HF API request failed", str(ctx.exception))
+
+
+'''
+GIT TESTS
+'''
+
+
+class TestGitClientRateLimit(unittest.TestCase):
+    def setUp(self) -> None:
+        GitClient.request_history.clear()
+
+    def tearDown(self) -> None:
+        GitClient.request_history.clear()
+
+    def test_global_rate_limit_window(self) -> None:
+        client = GitClient(max_requests=2, repo_path=".", window_seconds=10.0)
+
+        with patch("time.monotonic", side_effect=[100.0, 100.0, 100.0, 111.0]):
+            self.assertTrue(client.can_send())
+            self.assertTrue(client.can_send())
+            self.assertFalse(client.can_send())
+            self.assertTrue(client.can_send())
+
+
+class TestGitClientSend(unittest.TestCase):
+    def setUp(self) -> None:
+        GitClient.request_history.clear()
+
+    def tearDown(self) -> None:
+        GitClient.request_history.clear()
+
+    @patch.object(GitClient, "can_send", return_value=True)
+    @patch("subprocess.run")
+    def test__send_text_success(self,
+                                mock_run: MagicMock,
+                                _mock_can: MagicMock) -> None:
+        client = GitClient(max_requests=3, repo_path="/tmp/repo")
+
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stdout = "file1.txt\ndir/file2.py\n"
+        proc.stderr = ""
+        mock_run.return_value = proc
+
+        out = client._send("ls-files")
+        self.assertEqual(out, "file1.txt\ndir/file2.py")
+
+        args, kwargs = mock_run.call_args
+        self.assertEqual(args[0], ["git", "ls-files"])  # command
+        self.assertEqual(kwargs.get("cwd"), "/tmp/repo")
+
+    @patch.object(GitClient, "can_send", return_value=True)
+    @patch("subprocess.run")
+    def test__send_error_status(self,
+                                mock_run: MagicMock,
+                                _mock_can: MagicMock) -> None:
+        client = GitClient(max_requests=3, repo_path="/not/a/repo")
+
+        proc = MagicMock()
+        proc.returncode = 128
+        proc.stdout = ""
+        proc.stderr = "fatal: not a git repository"
+        mock_run.return_value = proc
+
+        with self.assertRaises(RuntimeError) as ctx:
+            client._send("status", "--porcelain")
+        self.assertIn("not a git repository", str(ctx.exception))
+
+    @patch.object(GitClient, "can_send", return_value=True)
+    @patch("subprocess.run")
+    def test_list_files_parses_output(self,
+                                      mock_run: MagicMock,
+                                      _mock_can: MagicMock) -> None:
+        client = GitClient(max_requests=3, repo_path="/tmp/repo")
+
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stdout = "a.txt\nb/c.md\n"
+        proc.stderr = ""
+        mock_run.return_value = proc
+
+        files = client.list_files()
+        self.assertEqual(files, ["a.txt", "b/c.md"])
+
+        args, _kwargs = mock_run.call_args
+        self.assertEqual(args[0], ["git", "ls-files"])  # used ls-files
 
 
 if __name__ == '__main__':
