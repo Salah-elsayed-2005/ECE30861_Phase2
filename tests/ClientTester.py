@@ -1,5 +1,7 @@
 import unittest
+import os
 from unittest.mock import MagicMock, patch
+
 import requests
 
 from src.Client import Client, GrokClient, HFClient, GitClient
@@ -327,6 +329,63 @@ class TestGitClientSend(unittest.TestCase):
 
         args, _kwargs = mock_run.call_args
         self.assertEqual(args[0], ["git", "ls-files"])  # used ls-files
+
+
+'''
+ENV VAR TOKEN TESTS
+'''
+
+
+class TestGrokClientEnvToken(unittest.TestCase):
+    @patch.object(GrokClient, "can_send", return_value=True)
+    @patch("requests.request")
+    def test_env_token_used_in_headers(self,
+                                       mock_req: MagicMock,
+                                       _mock_can: MagicMock) -> None:
+        with patch.dict(os.environ, {"GROQ_API_KEY": "env_groq"}, clear=False):
+            client = GrokClient(max_requests=3)
+
+        resp = MagicMock()
+        resp.ok = True
+        resp.json.return_value = {"ok": True}
+        mock_req.return_value = resp
+
+        _ = client._send("GET", "/status")
+
+        _, kwargs = mock_req.call_args
+        self.assertIn("Authorization", kwargs["headers"])
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer env_groq")
+
+    def test_missing_env_raises_value_error(self) -> None:
+        with patch.dict(os.environ, {"GROQ_API_KEY": ""}, clear=False):
+            with self.assertRaises(ValueError):
+                _ = GrokClient(max_requests=1)
+
+
+class TestHFClientEnvToken(unittest.TestCase):
+    @patch.object(HFClient, "can_send", return_value=True)
+    @patch("requests.request")
+    def test_env_token_used_in_headers(self,
+                                       mock_req: MagicMock,
+                                       _mock_can: MagicMock) -> None:
+        with patch.dict(os.environ, {"HF_TOKEN": "env_hf"}, clear=False):
+            client = HFClient(max_requests=3)
+
+        resp = MagicMock()
+        resp.ok = True
+        resp.json.return_value = {"ok": True}
+        mock_req.return_value = resp
+
+        _ = client._send("GET", "/api/spaces")
+
+        _, kwargs = mock_req.call_args
+        self.assertIn("Authorization", kwargs["headers"])
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer env_hf")
+
+    def test_missing_env_raises_value_error(self) -> None:
+        with patch.dict(os.environ, {"HF_TOKEN": ""}, clear=False):
+            with self.assertRaises(ValueError):
+                _ = HFClient(max_requests=1)
 
 
 if __name__ == '__main__':

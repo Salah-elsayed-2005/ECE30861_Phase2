@@ -26,3 +26,20 @@ def function_with_comment_below():
     Exception
         Reason
     """
+
+## API Keys
+
+- Groq: set `GROQ_API_KEY`
+- Hugging Face: set `HF_TOKEN`
+
+Usage options:
+- Pass tokens explicitly to clients (tests do this):
+  - `GrokClient(max_requests=3, token="...")`
+  - `HFClient(max_requests=3, token="...")`
+- Or rely on environment variables:
+  - `export GROQ_API_KEY=...`
+  - `export HF_TOKEN=...`
+
+Local setup:
+- Copy `.env.example` to `.env` and fill in values if you use a loader like `python-dotenv` locally.
+- `.env` is ignored by git.
