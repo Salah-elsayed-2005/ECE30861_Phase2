@@ -5,6 +5,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
+from Client import HFClient
+import time
+import os
 
 
 @dataclass(frozen=True)
@@ -61,15 +64,6 @@ class Metric(ABC):
             A score between 0.0 and 1.0.
         """
         raise NotImplementedError
-    
-    # src/license_metric.py
-# THIS CODE WILL HANDLE THE LICENSE METRIC.
-from Metrics import Metric, MetricResult
-# from huggingface_hub import HfApi
-from Client import HFClient
-from typing import Any
-import time
-import os
 
 
 class LicenseMetric(Metric):
