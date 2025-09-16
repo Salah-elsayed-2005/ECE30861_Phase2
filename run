@@ -20,7 +20,7 @@ case "$1" in
     ;;
   *) # absolute path assumed = URL_FILE
     echo "Running CLIApp(file)..."
-    python src/CLIApp.py $1
+    python -m src.CLIApp $1
     exit 0
     ;;
 esac
