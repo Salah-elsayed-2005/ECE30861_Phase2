@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
-from Client import HFClient
+from src.Client import HFClient
 import time
 import os
 
