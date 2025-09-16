@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 from src.Client import HFClient
 import time
-import os
 
 
 @dataclass(frozen=True)
@@ -171,13 +170,9 @@ class LicenseMetric(Metric):
 
     def compute(self, inputs: dict[str, Any], **kwargs) -> float:
         start = time.time()
-        model_id = inputs.get("model_id")
-        # api = HfApi()
-        # client = HFClient(max_requests=10, token="HF_TOKEN")
-        # model_info = client.request("GET", f"/api/models/{model_id}")
+        model_id = inputs.get("model_url")
         error = None
-        token = os.getenv("HF_TOKEN")
-        client = HFClient(max_requests=10, token=token)
+        client = HFClient(max_requests=10)
 
         try:
             # model_info = api.model_info(model_id, files_metadata=True)
