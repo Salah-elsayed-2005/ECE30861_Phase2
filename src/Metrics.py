@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
-from src.Client import HFClient
+from src.Client import HFClient, GrokClient
 import time
 
 
@@ -67,17 +67,21 @@ class Metric(ABC):
 
 class LicenseMetric(Metric):
     """
-    Checks the license type of a Hugging Face model
-    using HF Hub metadata.
-    Returns a score based on license_scores dict.
+    Metric that find the model license and assigns it
+    a score from 0 to 1 using a lookup table
+    or LLM if not found.
     """
-    # Based on:
-    # linking / distribution /
-    # modification / patent grant /
-    # private use and sublicensing
-    # (how wikipedia categorizes them)
+
+    # The below lookup table assigns scores based on
+    # how much each license allows for:
+    # linking, distribution, modification,
+    # patent grant, private use and sublicensing.
+    # Licenses that allow 5 or 6 of these are given a score of 1.0,
+    # those that allow 3 or 4 are given a score of 0.75,
+    # others are given a score of 0.5.
+
     license_scores: dict[str, float] = {
-        # Permissive
+        # Permissive (1.0)
         "apache-2.0": 1.0,
         "mit": 1.0,
         "afl-3.0": 1.0,
@@ -104,7 +108,7 @@ class LicenseMetric(Metric):
         "ncsa": 1.0,
         "etalab-2.0": 1.0,
 
-        # Less permissive
+        # Less permissive (0.75)
         "gpl-3.0": 0.75,
         "gpl-2.0": 0.75,
         "gpl": 0.75,
@@ -131,7 +135,7 @@ class LicenseMetric(Metric):
         "odbl": 0.75,
         "gfdl": 0.75,
 
-        # Restrictive
+        # Restrictive (0.5)
         "cc-by-nc-4.0": 0.5,
         "cc-by-nc-2.0": 0.5,
         "cc-by-nc-3.0": 0.5,
@@ -164,38 +168,74 @@ class LicenseMetric(Metric):
         "deepfloyd-if-license": 0.5,  # non-commercial research only
         "cc": 0.75,  # attribution-required
 
-        # maybe we should use an LLM for these guys, not sure yet
-        "other": 0.5  # catch-all, typically restrictive until specified
+        "other": 0.5  # catch-all
     }
 
+    def __init__(self):
+        self.hf_client = HFClient(max_requests=10)
+        self.grok_client = GrokClient(max_requests=10)
+
     def compute(self, inputs: dict[str, Any], **kwargs) -> float:
+        """
+        Compute the license score from parsed inputs.
+
+        Parameters
+        ----------
+        inputs : dict[str, Any]
+            Parsed inputs required by the metric. Must include a key called
+            'model_url' with its corresponding correct link
+
+        **kwargs : Any
+            Optional per-metric tuning parameters.
+
+        Returns
+        -------
+        float
+            A score between 0.0 and 1.0.
+
+        Raises
+        ------
+        RuntimeError
+            If no valid HF model URL is found in the dict
+        """
+        # model_url must be in the dict
+        if "model_url" not in inputs.keys():
+            raise ValueError("Model link not found in input dictionary")
+
+        # start latency timer and extract model_id from URL
         start = time.time()
-        model_id = inputs.get("model_url")
+        model_id = inputs['model_url'].split("https://huggingface.co/")[-1]
         error = None
-        client = HFClient(max_requests=10)
 
+        # try to get license from HFClient and assign a score
         try:
-            # model_info = api.model_info(model_id, files_metadata=True)
-            model_info = client.request("GET", f"/api/models/{model_id}")
-            card_data = model_info.get("cardData", {})
+            model_info = self.hf_client.request("GET",
+                                                f"/api/models/{model_id}")
+            card_data = model_info["cardData"]
             license_type = card_data["license"]
-
             if license_type is None:
                 score = 0.0
                 error = "Liscense not in card data"
             elif license_type not in self.license_scores:
-                score = 0.0
-                error = "License not found in dict"
+                # this grok call will likely never happen because all
+                # licenses not given on HF's license filter are labeled "other"
+                prompt = (f"Rank the this HuggingFace model: {model_id}. "
+                          "Give it of three scores, 1, 0.75, or 0.5. "
+                          "base your ranking on the rakings of this "
+                          "dictionary of licenses and their scores: "
+                          f"{str(self.license_scores)}")
+                score = self.grok_client.llm(prompt)
             else:
                 score = self.license_scores[license_type]
-
         except Exception as e:
             license_type = None
             score = 0.0
             error = str(e)
 
+        # end latency timer
         latency_ms = (time.time() - start) * 1000
 
+        # put all relevant info into MetricResult object
         self.result = MetricResult(
             metric="License Check",
             key="license",
