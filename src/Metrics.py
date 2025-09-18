@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
 from src.Client import GrokClient, HFClient
-from src.utils import browse_hf_repo
+from src.utils import browse_hf_repo, injectHFBrowser
 
 
 @dataclass(frozen=True)
@@ -68,6 +68,95 @@ class Metric(ABC):
             A score between 0.0 and 1.0.
         """
         raise NotImplementedError
+
+
+class RampUpTime(Metric):
+    """
+    Metric estimating ramp-up time based on the length of the
+    'Use this model' / 'Usage' section in a model's README on HuggingFace.
+
+    A shorter section implies quicker ramp-up, yielding a higher score.
+    """
+    name = "Ramp-Up Time"
+    key = "ramp_up_time"
+
+    def __init__(self):
+        self.client = HFClient(max_requests=3)
+        self.grok = GrokClient(max_requests=100)
+
+    def _extract_usage_section(self, text: str) -> str | None:
+        """
+        Ask the Grok LLM to isolate usage instructions from the README text.
+
+        Parameters
+        ----------
+        text : str
+            Raw page text harvested from the Hugging Face model page.
+
+        Returns
+        -------
+        str | None
+            Cleaned usage-focused excerpt, or ``None`` if no guidance is found
+            or the LLM request fails.
+        """
+        if not text:
+            return None
+
+        prompt = f"""
+        You are an AI assistant. Extract and return ONLY the sections
+        that explain how to use the model, code examples, or instructions
+        to get started. Ignore unrelated sections.
+
+        Text:
+        {text}
+
+        Extract usage text verbatim.
+        """
+        try:
+            # Assuming your GrokClient has an llm() method
+            response = self.grok.llm(prompt)
+            return response.strip() if response else None
+        except Exception as e:
+            print(f"Grok LLM extraction failed: {e}")
+            return None
+
+    def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
+        """
+        Score how quickly a developer can ramp up on a Hugging Face model.
+
+        Parameters
+        ----------
+        inputs : dict[str, Any]
+            Must include the key ``"model_url"`` pointing at the model page.
+        **kwargs : Any
+            Present for interface compatibility; unused.
+
+        Returns
+        -------
+        float
+            Ramp-up score between 0.0 (hard to learn) and 1.0 (fast to learn).
+        """
+        url = inputs.get("model_url")
+        if not url:
+            raise ValueError("Missing required input: model_url")
+
+        # Fetch the full page text using Selenium
+        full_page_text = injectHFBrowser(url)
+        usage_text = self._extract_usage_section(full_page_text)
+
+        if usage_text:
+            char_count = len(usage_text)
+        else:
+            print("Could not find any usage examples")
+            char_count = 0
+
+        # Weight long instructions logarithmically so modest increases in
+        # length do not crater the score, while extremely long sections still
+        # reduce it meaningfully.
+        score = 1.0 / (1.0 + math.log1p(char_count / 500))
+        score = max(0.0, min(score, 1.0))
+
+        return score
 
 
 class LicenseMetric(Metric):
