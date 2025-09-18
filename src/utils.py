@@ -69,14 +69,11 @@ def injectHFBrowser(model: str) -> str:
     """
     driver = webdriver.Chrome()
     try:
-        print(f"Navigating to model page: {model}")
         driver.get(model)
 
         WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "main"))
         )
-        print("Model page loaded.")
-
         # Wait until the body content is fully rendered
         WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.TAG_NAME, "body"))

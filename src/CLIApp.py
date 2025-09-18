@@ -3,7 +3,7 @@
 import sys
 
 from src.Dispatcher import Dispatcher
-from src.Metrics import LicenseMetric, SizeMetric
+from src.Metrics import LicenseMetric, RampUpTime, SizeMetric
 from src.Parser import Parser
 
 if __name__ == "__main__":
@@ -11,6 +11,7 @@ if __name__ == "__main__":
     urls_dict = parse.getGroups()
 
     dispatcher = Dispatcher([LicenseMetric(),
-                             SizeMetric()])
+                             SizeMetric(),
+                             RampUpTime()])
     results = dispatcher.dispatch(parse.getGroups())
     print(results)

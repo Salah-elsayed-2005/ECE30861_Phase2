@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import math
-import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
 from src.Client import GrokClient, HFClient
-from src.utils import browse_hf_repo
+from src.utils import browse_hf_repo, injectHFBrowser
 
 
 @dataclass(frozen=True)
@@ -78,6 +77,8 @@ class RampUpTime(Metric):
 
     A shorter section implies quicker ramp-up, yielding a higher score.
     """
+    name = "Ramp-Up Time"
+    key = "ramp_up_time"
 
     def __init__(self):
         self.client = HFClient(max_requests=3)
@@ -112,13 +113,9 @@ class RampUpTime(Metric):
         """
         Compute the ramp-up time score for a given HuggingFace model.
         """
-        start = time.perf_counter()
         url = inputs.get("model_url")
         if not url:
             raise ValueError("Missing required input: model_url")
-
-        # Parse repo_id like "google/gemma-1.1-7b-it"
-        repo_id = url.replace("https://huggingface.co/", "").strip("/")
 
         # Fetch the full page text using Selenium
         full_page_text = injectHFBrowser(url)
@@ -129,23 +126,12 @@ class RampUpTime(Metric):
         else:
             print("Could not find any usage examples")
             char_count = 0
-        print(char_count)
 
         # Score calculation: shorter usage text -> higher score
         score = 1.0 / (1.0 + math.log1p(char_count / 500))
         score = max(0.0, min(score, 1.0))
 
-        latency = (time.perf_counter() - start) * 1000
-
-        result = MetricResult(
-            metric="Ramp Up Time",
-            key="ramp_up_time",
-            value=score,
-            latency_ms=latency,
-            details={"char_count": char_count, "repo_id": repo_id},
-        )
-
-        return result.value
+        return score
 
 
 class LicenseMetric(Metric):
