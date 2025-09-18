@@ -98,7 +98,11 @@ class TestInjectHFBrowser(unittest.TestCase):
         output = injectHFBrowser(url)
 
         self.assertEqual(output, "Visible content")
-        mock_chrome_cls.assert_called_once_with()
+        # Chrome should be created with options (headless by default)
+        mock_chrome_cls.assert_called_once()
+        _args, kwargs = mock_chrome_cls.call_args
+        self.assertIn("options", kwargs)
+        self.assertIsNotNone(kwargs["options"])  # ensure options was provided
         driver.get.assert_called_once_with(url)
         self.assertEqual(wait_instance.until.call_count, 2)
         driver.find_element.assert_called_once()

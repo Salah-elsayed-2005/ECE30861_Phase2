@@ -62,7 +62,7 @@ def browse_hf_repo(
     ]
 
 
-def injectHFBrowser(model: str) -> str:
+def injectHFBrowser(model: str, headless: bool = True) -> str:
     """
     Retrieve the rendered Hugging Face model page via Selenium.
 
@@ -70,6 +70,8 @@ def injectHFBrowser(model: str) -> str:
     ----------
     model : str
         Fully-qualified URL for the target Hugging Face model repository.
+    headless : bool
+        When True (default), runs Chrome in headless mode so no window appears.
 
     Returns
     -------
@@ -83,7 +85,18 @@ def injectHFBrowser(model: str) -> str:
     installation available on the PATH.
     """
     # Use an ephemeral Chrome session so each call starts from a clean slate.
-    driver = webdriver.Chrome()
+    # Configure Chrome to run headless by default to avoid opening a window.
+    chrome_options = webdriver.ChromeOptions()
+    if headless:
+        # Use the modern headless mode if available
+        chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1280,800")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-infobars")
+
+    driver = webdriver.Chrome(options=chrome_options)
     try:
         driver.get(model)
 
