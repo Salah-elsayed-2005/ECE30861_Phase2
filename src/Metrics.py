@@ -369,3 +369,103 @@ class SizeMetric(Metric):
         score = min(score, 1)
         score = max(score, 0)
         return score
+
+
+import math
+import json
+
+class PerformanceClaimsMetric(Metric):
+    """
+    Metric that inspects the model card/README to detect
+    reported benchmarks and performance claims.
+    """
+    name = "Performance Claims"
+    key = "performance_claims"
+
+    def __init__(self):
+        self.hf_client = HFClient(max_requests=100)
+        self.grok_client = GrokClient(max_requests=100)
+
+    def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
+        """
+        Compute the metric score from parsed inputs.
+
+        Parameters
+        ----------
+        inputs : dict[str, Any]
+            Parsed inputs required by the metric. Must include a key called
+            'model_url' with its corresponding correct link
+
+        **kwargs : Any
+            Optional per-metric tuning parameters.
+
+        Returns
+        -------
+        float
+            A score between 0.0 and 1.0.
+
+        Raises
+        ------
+        RuntimeError
+            If no valid HF model URL is found in the dict
+        """
+        # model_url must be in the dict
+        if "model_url" not in inputs.keys():
+            raise ValueError("Model link not found in input dictionary")
+
+        # Extract the model id and get model info using API
+        model_id = inputs['model_url'].split("https://huggingface.co/")[-1]
+        card_data = self.hf_client.request("GET", f"/api/models/{model_id}")
+
+        has_benchmarks = False
+        externally_validated = False
+        evidence: Optional[str] = None
+
+        try:
+            # Fetch model card metadata (keep this lightweight; the LLM will do the analysis)
+            model_info = self.hf_client.request("GET", f"/api/models/{model_id}")
+            card_data = model_info.get("cardData", {}) if isinstance(model_info, dict) else {}
+            readme = ""
+            # Try common places for readme/long description
+            if isinstance(model_info, dict):
+                readme = model_info.get("readme") or card_data.get("readme") or ""
+            # Compose text for LLM inspection
+            inspect_text = "\n\n".join(
+                [str(card_data or ""), str(readme or "")]
+            )
+
+            # Prompt the LLM to return a small JSON describing whether benchmarks are present
+            prompt = (
+                "You are an assistant that inspects a model card / README and returns a JSON object\n"
+                "with keys: has_benchmarks (true/false), externally_validated (true/false), "
+                'evidence (short string). Respond ONLY with the JSON object.\n\n'
+                "Model card and README contents:\n\n"
+                f"{inspect_text}"
+            )
+
+            llm_out = self.grok_client.llm(prompt)
+            parsed = json.loads(llm_out) if isinstance(llm_out, str) else parsed  # type: ignore
+
+            # Defensive parsing
+            if isinstance(parsed, dict):
+                has_benchmarks = bool(parsed.get("has_benchmarks", False))
+                externally_validated = bool(parsed.get("externally_validated", False))
+                evidence = parsed.get("evidence")
+            else:
+                # Unexpected shape -> treat as no benchmarks but capture output as evidence
+                evidence = str(parsed)
+
+        except Exception as e:
+            error = str(e)
+            # Leave booleans as False on error; evidence may include exception
+            print(error)
+            evidence = evidence or error
+
+        # Score assignment
+        score = 0.0
+        if has_benchmarks:
+            score += 0.5
+        if externally_validated:
+            score += 0.5
+
+        return float(score)
