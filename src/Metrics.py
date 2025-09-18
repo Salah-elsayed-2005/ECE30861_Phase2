@@ -72,8 +72,8 @@ class SizeMetric(Metric):
     Metric that finds the model size in bits and converts it
     to a score from 0 to 1 using a lookup table
     """
-    maxModelBits = 603e9*16
-    # Found from : https://huggingface.co/giannisan/llama3.1-405B-upscaled-603B
+    maxModelBits = 8e11  # Decieded on 100GB being too big
+
     commonModelFileEndings = [
         ".bin",
         ".safetensors",
@@ -95,13 +95,29 @@ class SizeMetric(Metric):
     def extract_bits_from_saftensor(self,
                                     safeTensorDict: dict[str, int]) -> int:
         """
-        Extract the nunber of bits by infering from the key
+        Estimate the model footprint using safetensor metadata.
+
+        Parameters
+        ----------
+        safeTensorDict : dict[str, int]
+            Mapping from precision label (e.g., ``"float16"``) to the number
+            of tensors stored at that precision. The precision text is
+            expected to contain the bit-width as digits.
+
+        Returns
+        -------
+        int
+            Total number of bits implied by the smallest precision entry.
         """
         bits = []
         for precision in safeTensorDict.keys():
+            # Keys look like "float16" or "bfloat16"; pull out the digits to
+            # determine the bit-width represented by that entry.
             param_size = int(''.join(ch for ch in precision if ch.isdigit()))
             n_params = param_size * safeTensorDict[precision]
             bits.append(n_params)
+        # Pick the smallest bit count so we do not overestimate the footprint
+        # when multiple precisions are present.
         return min(bits)
 
     def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
@@ -153,10 +169,14 @@ class SizeMetric(Metric):
                 if any(f[0].endswith(ext)
                        for ext in SizeMetric.commonModelFileEndings):
                     files_filtered.append(f)
+
+            # No model files means we have no bits
             if len(files_filtered) == 0:
                 bits = -1
+            # Average the file sizes
             else:
-                bits = min(files_filtered, key=lambda x: x[1])[1]
+                all_bits = [f[1] for f in files_filtered]
+                bits = 8 * int(sum(all_bits) / len(all_bits))
 
         # Now that we have the bits, let's assign our score.
         # This will be based on a log scale between the number of bits of
@@ -166,12 +186,11 @@ class SizeMetric(Metric):
         # Jetson Nano.
         # Finally, we will clip between 0 and 1 in case of any extreme values.
         # For the Jetson Nano parameters we just want the model file to be
-        # under 4GB (the amount of VRAM the Nano has).
-
+        # under 1.5GB (1.2e10 bits).
         if bits <= 0:
             return 0
         score_raw = (1-math.log(bits / SizeMetric.maxModelBits))
-        score = score_raw / (1-math.log(4*8e9 / SizeMetric.maxModelBits))
+        score = score_raw / (1-math.log(1.2e10 / SizeMetric.maxModelBits))
         score = min(score, 1)
         score = max(score, 0)
         return score
