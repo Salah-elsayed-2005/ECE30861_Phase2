@@ -4,7 +4,8 @@ import unittest
 from dataclasses import FrozenInstanceError
 from unittest.mock import MagicMock, patch
 
-from src.Metrics import LicenseMetric, Metric, MetricResult, RampUpTime, SizeMetric
+from src.Metrics import (LicenseMetric, Metric, MetricResult, RampUpTime,
+                         SizeMetric)
 
 
 class TestMetricResult(unittest.TestCase):
@@ -220,7 +221,8 @@ class TestRampUpTimeMetric(unittest.TestCase):
         mock_inject.return_value = "full page text"
         mock_extract.return_value = None
 
-        score = metric.compute({"model_url": "https://huggingface.co/acme/model"})
+        input = {"model_url": "https://huggingface.co/acme/model"}
+        score = metric.compute(input)
 
         mock_inject.assert_called_once()
         mock_extract.assert_called_once_with("full page text")

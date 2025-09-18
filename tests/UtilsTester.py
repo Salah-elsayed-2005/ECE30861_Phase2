@@ -1,8 +1,8 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from src.Client import HFClient
 import src.utils as utils
+from src.Client import HFClient
 from src.utils import browse_hf_repo, injectHFBrowser
 
 
