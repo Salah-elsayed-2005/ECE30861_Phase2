@@ -5,8 +5,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
-from src.Client import HFClient, GrokClient
-import time
+
+from src.Client import GrokClient, HFClient
 
 
 @dataclass(frozen=True)
@@ -71,6 +71,9 @@ class LicenseMetric(Metric):
     a score from 0 to 1 using a lookup table
     or LLM if not found.
     """
+
+    name = "License Permissiveness"
+    key = "license_metric"
 
     # The below lookup table assigns scores based on
     # how much each license allows for:
@@ -172,8 +175,8 @@ class LicenseMetric(Metric):
     }
 
     def __init__(self):
-        self.hf_client = HFClient(max_requests=10)
-        self.grok_client = GrokClient(max_requests=10)
+        self.hf_client = HFClient(max_requests=100)
+        self.grok_client = GrokClient(max_requests=100)
 
     def compute(self, inputs: dict[str, Any], **kwargs) -> float:
         """
@@ -202,47 +205,31 @@ class LicenseMetric(Metric):
         if "model_url" not in inputs.keys():
             raise ValueError("Model link not found in input dictionary")
 
-        # start latency timer and extract model_id from URL
-        start = time.time()
+        # extract model_id from URL
         model_id = inputs['model_url'].split("https://huggingface.co/")[-1]
-        error = None
 
         # try to get license from HFClient and assign a score
-        try:
-            model_info = self.hf_client.request("GET",
-                                                f"/api/models/{model_id}")
-            card_data = model_info["cardData"]
-            license_type = card_data["license"]
-            if license_type is None:
-                score = 0.0
-                error = "Liscense not in card data"
-            elif license_type not in self.license_scores:
-                # this grok call will likely never happen because all
-                # licenses not given on HF's license filter are labeled "other"
-                prompt = (f"Rank the this HuggingFace model: {model_id}. "
-                          "Give it of three scores, 1, 0.75, or 0.5. "
-                          "base your ranking on the rakings of this "
-                          "dictionary of licenses and their scores: "
-                          f"{str(self.license_scores)}")
-                score = self.grok_client.llm(prompt)
-            else:
-                score = self.license_scores[license_type]
-        except Exception as e:
-            license_type = None
+        model_info = self.hf_client.request("GET",
+                                            f"/api/models/{model_id}")
+        card_data = model_info["cardData"]
+        license_type = card_data.get("license", None)
+        if license_type is None:
             score = 0.0
-            error = str(e)
-
-        # end latency timer
-        latency_ms = (time.time() - start) * 1000
-
-        # put all relevant info into MetricResult object
-        self.result = MetricResult(
-            metric="License Check",
-            key="license",
-            value=score,
-            latency_ms=latency_ms,
-            details={"license_type": license_type, "model_id": model_id},
-            error=error
-        )
+        elif license_type not in self.license_scores:
+            # this grok call will likely never happen because all
+            # licenses not given on HF's license filter are labeled "other"
+            prompt = (f"Rank the this HuggingFace model: {model_id}. "
+                      "Give it of three scores, 1, 0.75, or 0.5. "
+                      "base your ranking on the rakings of this "
+                      "dictionary of licenses and their scores: "
+                      f"{str(self.license_scores)}")
+            response = self.grok_client.llm(prompt)
+            new_prompt = ("Given this LLM output, please extract"
+                          "the score it assigned and only output"
+                          "the number and that's it. Here is the"
+                          f"response: {response}")
+            score = float(self.grok_client.llm(new_prompt))
+        else:
+            score = self.license_scores[license_type]
 
         return score
