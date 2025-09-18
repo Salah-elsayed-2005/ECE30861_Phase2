@@ -34,7 +34,7 @@ class Parser:
         """
         # Regex dictionary keyed by category
         self.filepath = filepath
-        self.urls: List[str] = self._loadUrls()
+        self.urls = self._loadUrls()
         self.regex_dict: Dict[str, re.Pattern] = {
             "dataset_url": re.compile(
                 r"https?://huggingface\.co/datasets/"
@@ -46,7 +46,7 @@ class Parser:
                 r"https?://github\.com/"
                 r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"),
         }
-        self.groups: Dict[str, List[str]] = self._categorize()
+        self.groups: Dict[str, str] = self._categorize()
 
     def _loadUrls(self) -> List[str]:
         """
@@ -60,42 +60,38 @@ class Parser:
         with open(self.filepath, "r", encoding="utf-8") as f:
             return [line.strip() for line in f if line.strip()]
 
-    def _categorize(self) -> Dict[str, List[str]]:
+    def _categorize(self) -> Dict[str, str]:
         """
         Categorize URLs into groups based on regex patterns.
 
         Returns
         -------
-        dict[str, list[str]]
-            Dictionary mapping category names to lists of URLs.
+        dict[str, str]
+            Dictionary mapping category names to
+            lists of URLs.
 
         Notes
         -----
         Any URL not matched by a known pattern is added
         to the 'unknown' category.
         """
-        result: Dict[str, List[str]] = {key: [] for key in self.regex_dict}
+        result: Dict[str, str] = {}
 
         for url in self.urls:
-            matched = False
             for category, pattern in self.regex_dict.items():
                 if pattern.match(url):
-                    result[category].append(url)
-                    matched = True
+                    result[category] = url
                     break
-            if not matched:
-                # Unknown URL default category
-                result.setdefault("unknown", []).append(url)
 
         return result
 
-    def getGroups(self) -> Dict[str, List[str]]:
+    def getGroups(self) -> Dict[str, str]:
         """
         Return categorized URLs.
 
         Returns
         -------
-        dict[str, list[str]]
+        dict[str, str]
             Dictionary of categorized URLs by type.
         """
         return (self.groups)
