@@ -7,8 +7,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
-from src.Client import GrokClient, HFClient
-from src.utils import browse_hf_repo
+from Client import GrokClient, HFClient
+from utils import browse_hf_repo
 
 
 @dataclass(frozen=True)
@@ -372,7 +372,6 @@ class SizeMetric(Metric):
 
 
 import math
-import json
 
 class PerformanceClaimsMetric(Metric):
     """
@@ -415,57 +414,37 @@ class PerformanceClaimsMetric(Metric):
 
         # Extract the model id and get model info using API
         model_id = inputs['model_url'].split("https://huggingface.co/")[-1]
-        card_data = self.hf_client.request("GET", f"/api/models/{model_id}")
+        card_data = self.hf_client.request("GET", f"/{model_id}/resolve/main/README.md")
 
-        has_benchmarks = False
-        externally_validated = False
-        evidence: Optional[str] = None
+        # print(card_data)
+        
+        # Try common places for readme/long description
+        if isinstance(card_data, dict):
+            readme = card_data.get("readme") or card_data.get("readme") or ""
+        # Compose text for LLM inspection
+        inspect_text = "\n\n".join(
+            [str(card_data or ""), str(readme or "")]
+        )
 
-        try:
-            # Fetch model card metadata (keep this lightweight; the LLM will do the analysis)
-            model_info = self.hf_client.request("GET", f"/api/models/{model_id}")
-            card_data = model_info.get("cardData", {}) if isinstance(model_info, dict) else {}
-            readme = ""
-            # Try common places for readme/long description
-            if isinstance(model_info, dict):
-                readme = model_info.get("readme") or card_data.get("readme") or ""
-            # Compose text for LLM inspection
-            inspect_text = "\n\n".join(
-                [str(card_data or ""), str(readme or "")]
-            )
+        # scrape text and look for words like benchmark, accuracy, eval, performance
+        # if any of these words are found, we put lines directly before or after into LLM
 
-            # Prompt the LLM to return a small JSON describing whether benchmarks are present
-            prompt = (
-                "You are an assistant that inspects a model card / README and returns a JSON object\n"
-                "with keys: has_benchmarks (true/false), externally_validated (true/false), "
-                'evidence (short string). Respond ONLY with the JSON object.\n\n'
-                "Model card and README contents:\n\n"
-                f"{inspect_text}"
-            )
+        if "benchmark" or "performance" or "accuracy" or "eval" in inspect_text.lower():
+            print("inside")
 
-            llm_out = self.grok_client.llm(prompt)
-            parsed = json.loads(llm_out) if isinstance(llm_out, str) else parsed  # type: ignore
-
-            # Defensive parsing
-            if isinstance(parsed, dict):
-                has_benchmarks = bool(parsed.get("has_benchmarks", False))
-                externally_validated = bool(parsed.get("externally_validated", False))
-                evidence = parsed.get("evidence")
-            else:
-                # Unexpected shape -> treat as no benchmarks but capture output as evidence
-                evidence = str(parsed)
-
-        except Exception as e:
-            error = str(e)
-            # Leave booleans as False on error; evidence may include exception
-            print(error)
-            evidence = evidence or error
-
-        # Score assignment
         score = 0.0
-        if has_benchmarks:
-            score += 0.5
-        if externally_validated:
-            score += 0.5
+        # Prompt the LLM to return a small describing whether benchmarks are present
+        # prompt = (
+        #     f"given this readme file: {inspect_text}"
+        #     "output a 1.0 if the readme contains performance claims "
+        #     "with benchmark results for the model. "
+        #     "output a 0.0 if there are no performance claims or "
+        #     "benchmark results. "
+        #     "ONLY output either the number 1.0 or the number 0.0. "
+        # )
+
+        # score = self.grok_client.llm(prompt)
+
+        print(score)
 
         return float(score)

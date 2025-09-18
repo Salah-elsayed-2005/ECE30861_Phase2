@@ -3,7 +3,7 @@
 
 from typing import List, Tuple
 
-from src.Client import HFClient
+from Client import HFClient
 
 
 def browse_hf_repo(
