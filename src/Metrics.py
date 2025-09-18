@@ -47,6 +47,9 @@ class Metric(ABC):
     Subclasses must implement ``compute()`` to perform the actual work.
     """
 
+    name: str  # Human-friendly metric name (e.g., "License Check").
+    key: str  # Identifier/slug for the metric (e.g., "license").
+
     @abstractmethod
     def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
         """
@@ -72,6 +75,8 @@ class SizeMetric(Metric):
     Metric that finds the model size in bits and converts it
     to a score from 0 to 1 using a lookup table
     """
+    name = "Model Size"
+    key = "size_metric"
     maxModelBits = 8e11  # Decieded on 100GB being too big
 
     commonModelFileEndings = [
