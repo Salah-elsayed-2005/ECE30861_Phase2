@@ -2,8 +2,15 @@
 # THIS CODE WILL HANDLE THE HIGH LEVEL LOGIC OF THE APP
 import sys
 
+from src.Dispatcher import Dispatcher
+from src.Metrics import LicenseMetric, SizeMetric
 from src.Parser import Parser
 
 if __name__ == "__main__":
     parse = Parser(sys.argv[1])
-    print(f"Parser groups: {parse.getGroups()}")
+    urls_dict = parse.getGroups()
+
+    dispatcher = Dispatcher([LicenseMetric(),
+                             SizeMetric()])
+    results = dispatcher.dispatch(parse.getGroups())
+    print(results)
