@@ -1,8 +1,9 @@
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from src.Client import HFClient
-from src.utils import browse_hf_repo
+import src.utils as utils
+from src.utils import browse_hf_repo, injectHFBrowser
 
 
 class TestBrowseHFRepo(unittest.TestCase):
@@ -71,6 +72,59 @@ class TestBrowseHFRepo(unittest.TestCase):
         result = browse_hf_repo(self.client, repo_id="owner/model")
 
         self.assertEqual(result, [])
+
+
+class TestInjectHFBrowser(unittest.TestCase):
+    """Verify Selenium-driven Hugging Face page scraping helper."""
+
+    @patch("src.utils.WebDriverWait")
+    @patch("src.utils.webdriver.Chrome")
+    def test_returns_body_text_and_cleans_up(
+        self,
+        mock_chrome_cls: MagicMock,
+        mock_wait_cls: MagicMock,
+    ) -> None:
+        driver = MagicMock()
+        mock_chrome_cls.return_value = driver
+
+        wait_instance = MagicMock()
+        mock_wait_cls.return_value = wait_instance
+
+        body_element = MagicMock()
+        body_element.text = "Visible content"
+        driver.find_element.return_value = body_element
+
+        url = "https://huggingface.co/owner/model"
+        output = injectHFBrowser(url)
+
+        self.assertEqual(output, "Visible content")
+        mock_chrome_cls.assert_called_once_with()
+        driver.get.assert_called_once_with(url)
+        self.assertEqual(wait_instance.until.call_count, 2)
+        driver.find_element.assert_called_once()
+        args, _ = driver.find_element.call_args
+        self.assertEqual(args, (utils.By.TAG_NAME, "body"))
+        driver.quit.assert_called_once()
+
+    @patch("src.utils.WebDriverWait")
+    @patch("src.utils.webdriver.Chrome")
+    def test_quits_driver_even_on_failure(
+        self,
+        mock_chrome_cls: MagicMock,
+        mock_wait_cls: MagicMock,
+    ) -> None:
+        driver = MagicMock()
+        mock_chrome_cls.return_value = driver
+
+        wait_instance = MagicMock()
+        mock_wait_cls.return_value = wait_instance
+
+        driver.find_element.side_effect = RuntimeError("boom")
+
+        with self.assertRaises(RuntimeError):
+            injectHFBrowser("https://huggingface.co/owner/broken")
+
+        driver.quit.assert_called_once()
 
 
 if __name__ == "__main__":
