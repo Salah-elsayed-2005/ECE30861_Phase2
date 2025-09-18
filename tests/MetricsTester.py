@@ -1,8 +1,10 @@
 # tests/MetricsTester.py
+import math
 import unittest
 from dataclasses import FrozenInstanceError
+from unittest.mock import MagicMock, patch
 
-from src.Metrics import Metric, MetricResult
+from src.Metrics import Metric, MetricResult, SizeMetric
 
 
 class TestMetricResult(unittest.TestCase):
@@ -58,6 +60,103 @@ class TestMetricABC(unittest.TestCase):
         score = m.compute({})
         self.assertIsInstance(score, float)
         self.assertEqual(score, 0.5)
+
+
+class TestSizeMetric(unittest.TestCase):
+    """Test the SizeMetric implementation without hitting the HF API."""
+
+    def test_compute_requires_model_url(self) -> None:
+        metric = SizeMetric()
+        with self.assertRaises(ValueError):
+            metric.compute({})
+
+    @patch("src.Metrics.browse_hf_repo")
+    @patch("src.Metrics.HFClient")
+    def test_compute_uses_safetensors_parameters(
+        self,
+        mock_hf_client_cls: MagicMock,
+        mock_browse: MagicMock,
+    ) -> None:
+        mock_client = mock_hf_client_cls.return_value
+        mock_client.request.return_value = {
+            "safetensors": {
+                "parameters": {
+                    "float16": 50,
+                    "float32": 100,
+                }
+            }
+        }
+
+        metric = SizeMetric()
+        inputs = {"model_url": "https://huggingface.co/acme/model"}
+        score = metric.compute(inputs)
+
+        self.assertEqual(score, 1.0)
+        mock_client.request.assert_called_once_with(
+            "GET",
+            "/api/models/acme/model",
+        )
+        mock_browse.assert_not_called()
+
+    @patch("src.Metrics.browse_hf_repo")
+    @patch("src.Metrics.HFClient")
+    def test_compute_falls_back_to_repo_when_no_safetensors(
+        self,
+        mock_hf_client_cls: MagicMock,
+        mock_browse: MagicMock,
+    ) -> None:
+        mock_client = mock_hf_client_cls.return_value
+        mock_client.request.return_value = {}
+        mock_browse.return_value = []
+
+        metric = SizeMetric()
+        inputs = {"model_url": "https://huggingface.co/acme/empty"}
+        score = metric.compute(inputs)
+
+        self.assertEqual(score, 0.0)
+        mock_client.request.assert_called_once_with(
+            "GET",
+            "/api/models/acme/empty",
+        )
+        mock_browse.assert_called_once_with(
+            mock_client,
+            "acme/empty",
+            repo_type="model",
+            revision="main",
+            recursive=True,
+        )
+
+    @patch("src.Metrics.browse_hf_repo")
+    @patch("src.Metrics.HFClient")
+    def test_compute_averages_model_file_sizes(
+        self,
+        mock_hf_client_cls: MagicMock,
+        mock_browse: MagicMock,
+    ) -> None:
+        mock_client = mock_hf_client_cls.return_value
+        mock_client.request.return_value = {}
+        mock_browse.return_value = [
+            ("weights/model.bin", 1000),
+            ("weights/model.pt", 3000),
+            ("README.md", 10),
+        ]
+
+        metric = SizeMetric()
+        inputs = {"model_url": "https://huggingface.co/acme/medium"}
+        score = metric.compute(inputs)
+
+        expected_bits = 8 * (1000 + 3000) / 2
+        denom = 1 - math.log(1.2e10 / SizeMetric.maxModelBits)
+        expected_score = 1 - math.log(expected_bits / SizeMetric.maxModelBits)
+        expected_score /= denom
+        expected_score = min(max(expected_score, 0.0), 1.0)
+
+        self.assertAlmostEqual(score, expected_score)
+        mock_client.request.assert_called_once_with(
+            "GET",
+            "/api/models/acme/medium",
+        )
+        mock_browse.assert_called_once()
 
 
 if __name__ == "__main__":
