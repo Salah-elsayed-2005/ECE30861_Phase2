@@ -2,9 +2,11 @@
 # Store any helper functions here
 
 from typing import List, Tuple
-
 from src.Client import HFClient
-
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 def browse_hf_repo(
     client: HFClient,
@@ -55,3 +57,30 @@ def browse_hf_repo(
         for e in entries
         if e.get("type") != "directory"
     ]
+
+
+def injectHFBrowser(model: str) -> str:
+    """
+    Opens the given Hugging Face model page in Selenium and
+    returns the visible model card text (<article> content).
+    """
+    driver = webdriver.Chrome()
+    try:
+        print(f"Navigating to model page: {model}")
+        driver.get(model)
+
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "main"))
+        )
+        print("Model page loaded.")
+
+        # Wait until the body content is fully rendered
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
+
+        # Get *all* visible text on the page
+        return driver.find_element(By.TAG_NAME, "body").text
+
+    finally:
+        driver.quit()
