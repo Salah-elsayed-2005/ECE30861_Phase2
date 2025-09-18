@@ -7,9 +7,10 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
+
 from src.utils import injectHFBrowser
 
-from .Client import HFClient, GrokClient
+from .Client import GrokClient, HFClient
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,7 @@ class Metric(ABC):
         """
         raise NotImplementedError
 
+
 class RampUpTime(Metric):
     """
     Metric estimating ramp-up time based on the length of the
@@ -90,14 +92,14 @@ class RampUpTime(Metric):
         You are an AI assistant. Extract and return ONLY the sections
         that explain how to use the model, code examples, or instructions
         to get started. Ignore unrelated sections.
-        
+
         Text:
         {text}
-        
+
         Extract usage text verbatim.
         """
         try:
-        # Assuming your GrokClient has an llm() method
+            # Assuming your GrokClient has an llm() method
             response = self.grok.llm(prompt)
             return response.strip() if response else None
         except Exception as e:
@@ -116,6 +118,7 @@ class RampUpTime(Metric):
         # Parse repo_id like "google/gemma-1.1-7b-it"
         repo_id = url.replace("https://huggingface.co/", "").strip("/")
 
+        # Fetch the full page text using Selenium
         full_page_text = injectHFBrowser(url)
         usage_text = self._extract_usage_section(full_page_text)
 
@@ -125,8 +128,8 @@ class RampUpTime(Metric):
             print("Could not find any usage examples")
             char_count = 0
         print(char_count)
-        # 4) Convert character count into a normalized score [0,1]
-        # <500 chars → 1.0 ; >2000 chars → 0.0
+
+        # Score calculation: shorter usage text -> higher score
         score = 1.0 / (1.0 + math.log1p(char_count / 500))
         score = max(0.0, min(score, 1.0))
 
@@ -141,4 +144,3 @@ class RampUpTime(Metric):
         )
 
         return result.value
-

@@ -2,11 +2,14 @@
 # Store any helper functions here
 
 from typing import List, Tuple
-from src.Client import HFClient
+
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+
+from src.Client import HFClient
+
 
 def browse_hf_repo(
     client: HFClient,
