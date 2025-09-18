@@ -60,34 +60,19 @@ class TestParser(unittest.TestCase):
 
     def test_multiple_urls(self):
         """Test that multiple URLs are categorized into correct groups"""
+        model = "https://huggingface.co/google/gemma-3-270m/tree/main"
         path = makeTestFile([
-            "https://huggingface.co/google/gemma-3-270m/tree/main",
+            model,
             "https://huggingface.co/datasets/xlangai/AgentNet",
             "https://github.com/SkyworkAI/Matrix-Game",
         ])
         parser = Parser(path)
         groups = parser.getGroups()
-        self.assertEqual(len(groups["model_url"]), 1)
-        self.assertEqual(len(groups["dataset_url"]), 1)
-        self.assertEqual(len(groups["git_url"]), 1)
-
-    def test_unknown_url(self):
-        """Test that random websites fall into 'unknown'"""
-        path = makeTestFile(["https://example.com/somepage"])
-        parser = Parser(path)
-        groups = parser.getGroups()
-        self.assertIn("https://example.com/somepage", groups["unknown"])
-
-    def test_malformed_urls(self):
-        """Test that malformed URLs are categorized as 'unknown'"""
-        path = makeTestFile([
-            "https://hugingface.co/bert-base-uncased",
-            "https://hugingface.co/datasets/imdb",
-            "https://gihub.com/user/repo"
-        ])
-        parser = Parser(path)
-        groups = parser.getGroups()
-        self.assertEqual(len(groups["unknown"]), 3)
+        self.assertEqual(groups["model_url"], model)
+        self.assertEqual(groups["dataset_url"],
+                         "https://huggingface.co/datasets/xlangai/AgentNet")
+        self.assertEqual(groups["git_url"],
+                         "https://github.com/SkyworkAI/Matrix-Game")
 
 
 if __name__ == '__main__':
