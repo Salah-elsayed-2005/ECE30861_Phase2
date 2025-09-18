@@ -64,9 +64,25 @@ def browse_hf_repo(
 
 def injectHFBrowser(model: str) -> str:
     """
-    Opens the given Hugging Face model page in Selenium and
-    returns the visible model card text (<article> content).
+    Retrieve the rendered Hugging Face model page via Selenium.
+
+    Parameters
+    ----------
+    model : str
+        Fully-qualified URL for the target Hugging Face model repository.
+
+    Returns
+    -------
+    str
+        Visible text contained within the page `<body>` element.
+
+    Notes
+    -----
+    A new Chrome WebDriver instance is created per call to avoid leaking
+    session state between runs. The host must have a compatible chromedriver
+    installation available on the PATH.
     """
+    # Use an ephemeral Chrome session so each call starts from a clean slate.
     driver = webdriver.Chrome()
     try:
         driver.get(model)
