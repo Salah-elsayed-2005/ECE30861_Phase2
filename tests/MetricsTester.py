@@ -65,7 +65,11 @@ class TestMetricABC(unittest.TestCase):
 class TestSizeMetric(unittest.TestCase):
     """Test the SizeMetric implementation without hitting the HF API."""
 
-    def test_compute_requires_model_url(self) -> None:
+    @patch("src.Metrics.HFClient")
+    def test_compute_requires_model_url(
+        self,
+        mock_hf_client_cls: MagicMock,
+    ) -> None:
         metric = SizeMetric()
         with self.assertRaises(ValueError):
             metric.compute({})
