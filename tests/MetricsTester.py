@@ -4,7 +4,7 @@ import unittest
 from dataclasses import FrozenInstanceError
 from unittest.mock import MagicMock, patch
 
-from src.Metrics import Metric, MetricResult, SizeMetric
+from src.Metrics import LicenseMetric, Metric, MetricResult, SizeMetric
 
 
 class TestMetricResult(unittest.TestCase):
@@ -161,6 +161,86 @@ class TestSizeMetric(unittest.TestCase):
             "/api/models/acme/medium",
         )
         mock_browse.assert_called_once()
+
+
+class TestLicenseMetric(unittest.TestCase):
+    """Test the LicenseMetric behavior under different license sources."""
+
+    @patch("src.Metrics.GrokClient")
+    @patch("src.Metrics.HFClient")
+    def test_requires_model_url(
+        self,
+        mock_hf_client_cls: MagicMock,
+        mock_grok_client_cls: MagicMock,
+    ) -> None:
+        metric = LicenseMetric()
+        with self.assertRaises(ValueError):
+            metric.compute({})
+
+    @patch("src.Metrics.GrokClient")
+    @patch("src.Metrics.HFClient")
+    def test_known_license_uses_lookup(
+        self,
+        mock_hf_client_cls: MagicMock,
+        mock_grok_client_cls: MagicMock,
+    ) -> None:
+        mock_client = mock_hf_client_cls.return_value
+        mock_client.request.return_value = {
+            "cardData": {"license": "apache-2.0"},
+        }
+
+        metric = LicenseMetric()
+        inputs = {"model_url": "https://huggingface.co/acme/model"}
+        score = metric.compute(inputs)
+
+        self.assertEqual(score, 1.0)
+        mock_client.request.assert_called_once_with(
+            "GET",
+            "/api/models/acme/model",
+        )
+        mock_grok_client_cls.return_value.llm.assert_not_called()
+
+    @patch("src.Metrics.GrokClient")
+    @patch("src.Metrics.HFClient")
+    def test_missing_license_defaults_to_zero(
+        self,
+        mock_hf_client_cls: MagicMock,
+        mock_grok_client_cls: MagicMock,
+    ) -> None:
+        mock_client = mock_hf_client_cls.return_value
+        mock_client.request.return_value = {"cardData": {}}
+
+        metric = LicenseMetric()
+        inputs = {"model_url": "https://huggingface.co/acme/model"}
+        score = metric.compute(inputs)
+
+        self.assertEqual(score, 0.0)
+        mock_grok_client_cls.return_value.llm.assert_not_called()
+
+    @patch("src.Metrics.GrokClient")
+    @patch("src.Metrics.HFClient")
+    def test_unknown_license_asks_grok(
+        self,
+        mock_hf_client_cls: MagicMock,
+        mock_grok_client_cls: MagicMock,
+    ) -> None:
+        mock_client = mock_hf_client_cls.return_value
+        mock_client.request.return_value = {
+            "cardData": {"license": "mystery-license"},
+        }
+
+        mock_grok = mock_grok_client_cls.return_value
+        mock_grok.llm.side_effect = [
+            "The model seems moderately permissive, score 0.75",
+            "0.75",
+        ]
+
+        metric = LicenseMetric()
+        inputs = {"model_url": "https://huggingface.co/acme/model"}
+        score = metric.compute(inputs)
+
+        self.assertEqual(score, 0.75)
+        self.assertEqual(mock_grok.llm.call_count, 2)
 
 
 if __name__ == "__main__":
