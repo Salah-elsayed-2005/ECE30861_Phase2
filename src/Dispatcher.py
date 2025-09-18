@@ -94,5 +94,5 @@ class Dispatcher:
         except Exception as exc:
             result = float("nan")
             error = f"{exc.__class__.__name__}: {exc}"
-        latency_ms = (time.perf_counter() - start) * 1000.0
+        latency_ms = int((time.perf_counter() - start) * 1000.0)
         return result, latency_ms, error
