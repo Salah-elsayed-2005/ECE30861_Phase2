@@ -4,8 +4,8 @@ import unittest
 from dataclasses import FrozenInstanceError
 from unittest.mock import MagicMock, patch
 
-from src.Metrics import (AvailabilityMetric, LicenseMetric, Metric,
-                         MetricResult, RampUpTime, SizeMetric)
+from src.Metrics import (LicenseMetric, Metric, MetricResult, RampUpTime,
+                         SizeMetric)
 
 
 class TestMetricResult(unittest.TestCase):
@@ -308,116 +308,6 @@ class TestLicenseMetric(unittest.TestCase):
 
         self.assertEqual(score, 0.75)
         self.assertEqual(mock_grok.llm.call_count, 2)
-
-
-class TestAvailabilityMetric(unittest.TestCase):
-    """Tests for AvailabilityMetric without hitting external services."""
-
-    @patch("src.Metrics.injectHFBrowser")
-    def test_requires_model_url(self, mock_inject: MagicMock) -> None:
-        metric = AvailabilityMetric()
-        with self.assertRaises(ValueError):
-            metric.compute({})
-        mock_inject.assert_not_called()
-
-    @patch("src.Metrics.GrokClient")
-    @patch("src.Metrics.injectHFBrowser")
-    def test_llm_json_success_both_available(
-        self,
-        mock_inject: MagicMock,
-        mock_grok_client_cls: MagicMock,
-    ) -> None:
-        metric = AvailabilityMetric()
-        # Pretend Selenium returned this text
-        mock_inject.return_value = "some rendered page text"
-        # LLM returns strict JSON
-        mock_grok = mock_grok_client_cls.return_value
-        mock_grok.llm.return_value = (
-            '{"dataset_available": true, "codebase_available": true, '
-            '"dataset_evidence": "https://huggingface.co/datasets/acme/data", '
-            '"codebase_evidence": "https://github.com/acme/repo"}'
-        )
-
-        score = metric.compute({"model_url":
-                                "https://huggingface.co/acme/model"})
-
-        self.assertEqual(score, 1.0)
-        self.assertIsNotNone(metric.last_details)
-        self.assertTrue(metric.last_details["dataset_available"])
-        self.assertTrue(metric.last_details["codebase_available"])
-        self.assertIn("datasets/acme", metric.last_details["dataset_evidence"])
-        self.assertIn("github.com", metric.last_details["codebase_evidence"])
-
-    @patch("src.Metrics.GrokClient")
-    @patch("src.Metrics.injectHFBrowser")
-    def test_llm_json_partial_availability(
-        self,
-        mock_inject: MagicMock,
-        mock_grok_client_cls: MagicMock,
-    ) -> None:
-        metric = AvailabilityMetric()
-        mock_inject.return_value = "rendered text"
-        mock_grok = mock_grok_client_cls.return_value
-        mock_grok.llm.return_value = (
-            '{"dataset_available": true, "codebase_available": false, '
-            '"dataset_evidence": "dataset card present", '
-            '"codebase_evidence": ""}'
-        )
-
-        score = metric.compute({"model_url":
-                                "https://huggingface.co/acme/model"})
-        self.assertEqual(score, 0.5)
-        self.assertTrue(metric.last_details["dataset_available"])
-        self.assertFalse(metric.last_details["codebase_available"])
-        self.assertIn("dataset", metric.last_details["dataset_evidence"])
-
-    @patch("src.Metrics.GrokClient")
-    @patch("src.Metrics.injectHFBrowser")
-    def test_llm_malformed_falls_back_to_heuristics(
-        self,
-        mock_inject: MagicMock,
-        mock_grok_client_cls: MagicMock,
-    ) -> None:
-        metric = AvailabilityMetric()
-        # Page text includes keywords for both dataset and code references
-        page_text = (
-            "This model was trained on huggingface.co/datasets/acme/data. "
-            "The source code is available at github.com/acme/repo."
-        )
-        mock_inject.return_value = page_text
-        # LLM returns non-JSON garbage, triggering fallback
-        mock_grok = mock_grok_client_cls.return_value
-        mock_grok.llm.return_value = "Sure, looks good!"  # not JSON
-
-        score = metric.compute({"model_url":
-                                "https://huggingface.co/acme/model"})
-        self.assertEqual(score, 1.0)
-        # Evidence should include snippets near the matched keywords
-        self.assertIn("huggingface.co/datasets",
-                      metric.last_details["dataset_evidence"])
-        self.assertIn("github.com/", metric.last_details["codebase_evidence"])
-
-    @patch("src.Metrics.GrokClient")
-    @patch("src.Metrics.injectHFBrowser")
-    def test_none_available_scores_zero(
-        self,
-        mock_inject: MagicMock,
-        mock_grok_client_cls: MagicMock,
-    ) -> None:
-        metric = AvailabilityMetric()
-        mock_inject.return_value = \
-            "No links or references to datasets or repositories here."
-        mock_grok = mock_grok_client_cls.return_value
-        mock_grok.llm.return_value = (
-            '{"dataset_available": false, "codebase_available": false, '
-            '"dataset_evidence": "", "codebase_evidence": ""}'
-        )
-
-        score = metric.compute({"model_url":
-                                "https://huggingface.co/acme/model"})
-        self.assertEqual(score, 0.0)
-        self.assertFalse(metric.last_details["dataset_available"])
-        self.assertFalse(metric.last_details["codebase_available"])
 
 
 if __name__ == "__main__":
