@@ -86,7 +86,18 @@ class RampUpTime(Metric):
 
     def _extract_usage_section(self, text: str) -> str | None:
         """
-        Use the Grok LLM to extract all usage-related text from the input text.
+        Ask the Grok LLM to isolate usage instructions from the README text.
+
+        Parameters
+        ----------
+        text : str
+            Raw page text harvested from the Hugging Face model page.
+
+        Returns
+        -------
+        str | None
+            Cleaned usage-focused excerpt, or ``None`` if no guidance is found
+            or the LLM request fails.
         """
         if not text:
             return None
@@ -111,7 +122,19 @@ class RampUpTime(Metric):
 
     def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
         """
-        Compute the ramp-up time score for a given HuggingFace model.
+        Score how quickly a developer can ramp up on a Hugging Face model.
+
+        Parameters
+        ----------
+        inputs : dict[str, Any]
+            Must include the key ``"model_url"`` pointing at the model page.
+        **kwargs : Any
+            Present for interface compatibility; unused.
+
+        Returns
+        -------
+        float
+            Ramp-up score between 0.0 (hard to learn) and 1.0 (fast to learn).
         """
         url = inputs.get("model_url")
         if not url:
@@ -127,7 +150,9 @@ class RampUpTime(Metric):
             print("Could not find any usage examples")
             char_count = 0
 
-        # Score calculation: shorter usage text -> higher score
+        # Weight long instructions logarithmically so modest increases in
+        # length do not crater the score, while extremely long sections still
+        # reduce it meaningfully.
         score = 1.0 / (1.0 + math.log1p(char_count / 500))
         score = max(0.0, min(score, 1.0))
 
