@@ -7,8 +7,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
-from Client import GrokClient, HFClient
-from utils import browse_hf_repo
+from src.Client import GrokClient, HFClient
+from src.utils import browse_hf_repo, injectHFBrowser
 
 
 @dataclass(frozen=True)
@@ -68,6 +68,95 @@ class Metric(ABC):
             A score between 0.0 and 1.0.
         """
         raise NotImplementedError
+
+
+class RampUpTime(Metric):
+    """
+    Metric estimating ramp-up time based on the length of the
+    'Use this model' / 'Usage' section in a model's README on HuggingFace.
+
+    A shorter section implies quicker ramp-up, yielding a higher score.
+    """
+    name = "Ramp-Up Time"
+    key = "ramp_up_time"
+
+    def __init__(self):
+        self.client = HFClient(max_requests=3)
+        self.grok = GrokClient(max_requests=100)
+
+    def _extract_usage_section(self, text: str) -> str | None:
+        """
+        Ask the Grok LLM to isolate usage instructions from the README text.
+
+        Parameters
+        ----------
+        text : str
+            Raw page text harvested from the Hugging Face model page.
+
+        Returns
+        -------
+        str | None
+            Cleaned usage-focused excerpt, or ``None`` if no guidance is found
+            or the LLM request fails.
+        """
+        if not text:
+            return None
+
+        prompt = f"""
+        You are an AI assistant. Extract and return ONLY the sections
+        that explain how to use the model, code examples, or instructions
+        to get started. Ignore unrelated sections.
+
+        Text:
+        {text}
+
+        Extract usage text verbatim.
+        """
+        try:
+            # Assuming your GrokClient has an llm() method
+            response = self.grok.llm(prompt)
+            return response.strip() if response else None
+        except Exception as e:
+            print(f"Grok LLM extraction failed: {e}")
+            return None
+
+    def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
+        """
+        Score how quickly a developer can ramp up on a Hugging Face model.
+
+        Parameters
+        ----------
+        inputs : dict[str, Any]
+            Must include the key ``"model_url"`` pointing at the model page.
+        **kwargs : Any
+            Present for interface compatibility; unused.
+
+        Returns
+        -------
+        float
+            Ramp-up score between 0.0 (hard to learn) and 1.0 (fast to learn).
+        """
+        url = inputs.get("model_url")
+        if not url:
+            raise ValueError("Missing required input: model_url")
+
+        # Fetch the full page text using Selenium
+        full_page_text = injectHFBrowser(url)
+        usage_text = self._extract_usage_section(full_page_text)
+
+        if usage_text:
+            char_count = len(usage_text)
+        else:
+            print("Could not find any usage examples")
+            char_count = 0
+
+        # Weight long instructions logarithmically so modest increases in
+        # length do not crater the score, while extremely long sections still
+        # reduce it meaningfully.
+        score = 1.0 / (1.0 + math.log1p(char_count / 500))
+        score = max(0.0, min(score, 1.0))
+
+        return score
 
 
 class LicenseMetric(Metric):
@@ -371,23 +460,125 @@ class SizeMetric(Metric):
         return score
 
 
-import math
-
-class PerformanceClaimsMetric(Metric):
+class AvailabilityMetric(Metric):
     """
-    Metric that inspects the model card/README to detect
-    reported benchmarks and performance claims.
-    """
-    name = "Performance Claims"
-    key = "performance_claims"
+    Metric that checks whether a model has an associated dataset and codebase
+    available. Awards 0.5 for each item found via the model card.
 
-    def __init__(self):
-        self.hf_client = HFClient(max_requests=100)
-        self.grok_client = GrokClient(max_requests=100)
+    This metric uses Selenium (via ``injectHFBrowser``) to retrieve the full
+    rendered model page text and a Grok LLM to identify mentions/links to an
+    available dataset and an available code repository.
+    """
+
+    name = "Availability"
+    key = "availability_metric"
+
+    def __init__(self) -> None:
+        self.grok = GrokClient(max_requests=100)
+        self.last_details: dict[str, Any] = {}
+
+    def _llm_detect_availability(self, page_text: str) \
+            -> tuple[bool, bool, str, str]:
+        """
+        Use the Grok LLM to determine whether the page text indicates a
+        dataset and/or a codebase are available.
+
+        Parameters
+        ----------
+        page_text : str
+            Visible text of the Hugging Face model page.
+
+        Returns
+        -------
+        tuple[bool, bool, str, str]
+            (dataset_available, codebase_available,
+            dataset_evidence, codebase_evidence).
+        """
+        if not page_text:
+            return (False, False, "", "")
+
+        prompt = f"""
+        You will be given the visible text of a Hugging Face model page.
+        Determine if BOTH of the following are PRESENT AND AVAILABLE to users:
+
+        1) A dataset: a specific dataset link/name indicating training or
+        evaluation data,
+           or a clear pointer to a dataset page (e.g.,
+           huggingface.co/datasets/...,
+           Kaggle dataset, etc.).
+           If URL, just the URL is sufficient for evidence.
+        2) A codebase: a concrete link to source code repository
+        (e.g., GitHub/GitLab/Bitbucket) or an
+           installable package with a repository reference. If URL, just the
+           URL is sufficient for evidence.
+
+        Respond STRICTLY in compact JSON with four fields:
+        {{"dataset_available": <true|false>, "codebase_available":
+        <true|false>,
+        "dataset_evidence": "<short snippet or URL>",
+        "codebase_evidence": "<short snippet or URL>"}}
+
+        Text:
+        {page_text}
+        """
+
+        try:
+            raw = self.grok.llm(prompt)
+            import json
+            text = (raw or "").strip()
+            if text.startswith("```"):
+                text = text.strip('`')
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                text = text[start:end+1]
+            obj = json.loads(text)
+            dataset = bool(obj.get("dataset_available", False))
+            codebase = bool(obj.get("codebase_available", False))
+            dataset_ev = str(obj.get("dataset_evidence", ""))[:500]
+            codebase_ev = str(obj.get("codebase_evidence", ""))[:500]
+            return (dataset, codebase, dataset_ev, codebase_ev)
+        except Exception:
+            lower = page_text.lower()
+            dataset_hits = any(
+                kw in lower for kw in [
+                    "huggingface.co/datasets/", " datasets/", "dataset:",
+                    "trained on", "training data:", "evaluation dataset",
+                    "kaggle.com/datasets", "dataset card"
+                ]
+            )
+            codebase_hits = any(
+                kw in lower for kw in [
+                    "github.com/", "gitlab.com/", "bitbucket.org/",
+                    "source code", "repository", "codebase"
+                ]
+            )
+            # Heuristic evidence snippets
+            dataset_ev = ""
+            codebase_ev = ""
+            if dataset_hits:
+                for kw in [
+                    "huggingface.co/datasets/", "kaggle.com/datasets",
+                    "dataset card", "evaluation dataset"
+                ]:
+                    idx = lower.find(kw)
+                    if idx != -1:
+                        dataset_ev = page_text[max(0, idx-40): idx+120]
+                        break
+            if codebase_hits:
+                for kw in [
+                    "github.com/", "gitlab.com/", "bitbucket.org/",
+                    "source code", "repository"
+                ]:
+                    idx = lower.find(kw)
+                    if idx != -1:
+                        codebase_ev = page_text[max(0, idx-40): idx+120]
+                        break
+            return (dataset_hits, codebase_hits, dataset_ev, codebase_ev)
 
     def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
         """
-        Compute the metric score from parsed inputs.
+        Compute the availability score based on dataset/codebase presence.
 
         Parameters
         ----------
@@ -401,50 +592,37 @@ class PerformanceClaimsMetric(Metric):
         Returns
         -------
         float
-            A score between 0.0 and 1.0.
+            A score between 0.0 and 1.0. Dataset availability contributes 0.5,
+            and codebase availability contributes 0.5.
 
         Raises
         ------
-        RuntimeError
-            If no valid HF model URL is found in the dict
+        ValueError
+            If 'model_url' is missing from inputs.
         """
-        # model_url must be in the dict
-        if "model_url" not in inputs.keys():
+        if "model_url" not in inputs:
             raise ValueError("Model link not found in input dictionary")
 
-        # Extract the model id and get model info using API
-        model_id = inputs['model_url'].split("https://huggingface.co/")[-1]
-        card_data = self.hf_client.request("GET", f"/{model_id}/resolve/main/README.md")
+        url = inputs["model_url"]
+        # Retrieve full, rendered text from the model page
+        page_text = injectHFBrowser(url)
 
-        # print(card_data)
-        
-        # Try common places for readme/long description
-        if isinstance(card_data, dict):
-            readme = card_data.get("readme") or card_data.get("readme") or ""
-        # Compose text for LLM inspection
-        inspect_text = "\n\n".join(
-            [str(card_data or ""), str(readme or "")]
-        )
-
-        # scrape text and look for words like benchmark, accuracy, eval, performance
-        # if any of these words are found, we put lines directly before or after into LLM
-
-        if "benchmark" or "performance" or "accuracy" or "eval" in inspect_text.lower():
-            print("inside")
+        (dataset_available, codebase_available,
+         dataset_ev, codebase_ev) = self._llm_detect_availability(page_text)
 
         score = 0.0
-        # Prompt the LLM to return a small describing whether benchmarks are present
-        # prompt = (
-        #     f"given this readme file: {inspect_text}"
-        #     "output a 1.0 if the readme contains performance claims "
-        #     "with benchmark results for the model. "
-        #     "output a 0.0 if there are no performance claims or "
-        #     "benchmark results. "
-        #     "ONLY output either the number 1.0 or the number 0.0. "
-        # )
+        if dataset_available:
+            score += 0.5
+        if codebase_available:
+            score += 0.5
 
-        # score = self.grok_client.llm(prompt)
+        # Expose details for testing/inspection
+        self.last_details = {
+            "dataset_available": dataset_available,
+            "codebase_available": codebase_available,
+            "dataset_evidence": dataset_ev,
+            "codebase_evidence": codebase_ev,
+        }
+        # print(self.last_details)
 
-        print(score)
-
-        return float(score)
+        return score

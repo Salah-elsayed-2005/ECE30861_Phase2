@@ -4,7 +4,8 @@ import unittest
 from dataclasses import FrozenInstanceError
 from unittest.mock import MagicMock, patch
 
-from src.Metrics import LicenseMetric, Metric, MetricResult, SizeMetric
+from src.Metrics import (LicenseMetric, Metric, MetricResult, RampUpTime,
+                         SizeMetric)
 
 
 class TestMetricResult(unittest.TestCase):
@@ -161,6 +162,72 @@ class TestSizeMetric(unittest.TestCase):
             "/api/models/acme/medium",
         )
         mock_browse.assert_called_once()
+
+
+class TestRampUpTimeMetric(unittest.TestCase):
+    """Test the RampUpTime metric without calling external services."""
+
+    @patch("src.Metrics.GrokClient")
+    @patch("src.Metrics.HFClient")
+    def test_requires_model_url(
+        self,
+        mock_hf_client_cls: MagicMock,
+        mock_grok_client_cls: MagicMock,
+    ) -> None:
+        metric = RampUpTime()
+        with self.assertRaises(ValueError):
+            metric.compute({})
+
+    @patch("src.Metrics.injectHFBrowser")
+    @patch.object(RampUpTime, "_extract_usage_section")
+    @patch("src.Metrics.GrokClient")
+    @patch("src.Metrics.HFClient")
+    def test_compute_uses_usage_excerpt(
+        self,
+        _mock_hf_client_cls: MagicMock,
+        _mock_grok_client_cls: MagicMock,
+        mock_extract: MagicMock,
+        mock_inject: MagicMock,
+    ) -> None:
+        metric = RampUpTime()
+        mock_inject.return_value = "full page text"
+        mock_extract.return_value = "Example usage instructions"
+
+        url = "https://huggingface.co/acme/model"
+        score = metric.compute({"model_url": url})
+
+        mock_inject.assert_called_once_with(url)
+        mock_extract.assert_called_once_with("full page text")
+
+        char_count = len("Example usage instructions")
+        expected = 1.0 / (1.0 + math.log1p(char_count / 500))
+        expected = max(0.0, min(expected, 1.0))
+        self.assertAlmostEqual(score, expected)
+
+    @patch("builtins.print")
+    @patch("src.Metrics.injectHFBrowser")
+    @patch.object(RampUpTime, "_extract_usage_section")
+    @patch("src.Metrics.GrokClient")
+    @patch("src.Metrics.HFClient")
+    def test_compute_handles_missing_usage_excerpt(
+        self,
+        _mock_hf_client_cls: MagicMock,
+        _mock_grok_client_cls: MagicMock,
+        mock_extract: MagicMock,
+        mock_inject: MagicMock,
+        mock_print: MagicMock,
+    ) -> None:
+        metric = RampUpTime()
+        mock_inject.return_value = "full page text"
+        mock_extract.return_value = None
+
+        input = {"model_url": "https://huggingface.co/acme/model"}
+        score = metric.compute(input)
+
+        mock_inject.assert_called_once()
+        mock_extract.assert_called_once_with("full page text")
+        mock_print.assert_called()
+        self.assertEqual(score, 1.0)
 
 
 class TestLicenseMetric(unittest.TestCase):
