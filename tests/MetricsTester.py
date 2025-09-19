@@ -4,8 +4,8 @@ import unittest
 from dataclasses import FrozenInstanceError
 from unittest.mock import MagicMock, patch
 
-from src.Metrics import (AvailabilityMetric, LicenseMetric, Metric,
-                         MetricResult, RampUpTime, SizeMetric)
+from src.Metrics import (AvailabilityMetric, DatasetQuality, LicenseMetric,
+                         Metric, MetricResult, RampUpTime, SizeMetric)
 
 
 class TestMetricResult(unittest.TestCase):
@@ -308,6 +308,130 @@ class TestLicenseMetric(unittest.TestCase):
 
         self.assertEqual(score, 0.75)
         self.assertEqual(mock_grok.llm.call_count, 2)
+
+
+class TestDatasetQualityMetric(unittest.TestCase):
+    """Test the DatasetQuality metric w/o touching real Hugging Face APIs."""
+
+    @patch("src.Metrics.HFClient")
+    def test_compute_returns_zero_when_dataset_missing(
+        self,
+        _mock_hf_client_cls: MagicMock,
+    ) -> None:
+        metric = DatasetQuality()
+
+        score = metric.compute({})
+
+        self.assertEqual(score, 0.0)
+        self.assertEqual(metric.last_details, {"reason": "dataset_not_found"})
+
+    @patch.object(DatasetQuality, "count_models_for_dataset")
+    @patch.object(DatasetQuality, "_fetch_dataset", return_value=None)
+    @patch("src.Metrics.HFClient")
+    def test_compute_handles_dataset_fetch_failure(
+        self,
+        _mock_hf_client_cls: MagicMock,
+        mock_fetch_dataset: MagicMock,
+        mock_count_models: MagicMock,
+    ) -> None:
+        metric = DatasetQuality()
+
+        inputs = {"dataset_url": "https://huggingface.co/datasets/acme/data"}
+        score = metric.compute(inputs)
+
+        self.assertEqual(score, 0.0)
+        self.assertEqual(
+            metric.last_details,
+            {"dataset_id": "acme/data", "reason": "hf_api_error"},
+        )
+        mock_fetch_dataset.assert_called_once_with("acme/data")
+        mock_count_models.assert_not_called()
+
+    @patch.object(DatasetQuality, "count_models_for_dataset", return_value=25)
+    @patch.object(DatasetQuality, "_fetch_dataset")
+    @patch("src.Metrics.HFClient")
+    def test_compute_blends_reuse_and_likes(
+        self,
+        _mock_hf_client_cls: MagicMock,
+        mock_fetch_dataset: MagicMock,
+        mock_count_models: MagicMock,
+    ) -> None:
+        likes = 100
+        mock_fetch_dataset.return_value = {"likes": likes}
+
+        metric = DatasetQuality()
+        score = metric.compute(
+            {"dataset_url": "https://huggingface.co/datasets/acme/data"}
+        )
+
+        expected_likes = min(1.0, math.log1p(likes) / math.log1p(250))
+        expected_use = min(1.0, math.log1p(25) / math.log1p(40))
+        expected_score = 0.6 * expected_use + 0.4 * expected_likes
+        expected_score = max(0.0, min(expected_score, 1.0))
+
+        self.assertAlmostEqual(score, expected_score)
+
+        details = metric.last_details
+        self.assertEqual(details["dataset_id"], "acme/data")
+        self.assertEqual(details["likes"], likes)
+        self.assertEqual(details["use_count"], 25)
+        self.assertAlmostEqual(details["likes_score"], expected_likes)
+        self.assertAlmostEqual(details["use_score"], expected_use)
+
+        mock_fetch_dataset.assert_called_once_with("acme/data")
+        args, kwargs = mock_count_models.call_args
+        self.assertEqual(args[0], "acme/data")
+        self.assertEqual(kwargs, {})
+
+    @patch.object(DatasetQuality, "_fetch_model")
+    @patch("src.Metrics.HFClient")
+    def test_extract_dataset_id_from_model_metadata(
+        self,
+        _mock_hf_client_cls: MagicMock,
+        mock_fetch_model: MagicMock,
+    ) -> None:
+        mock_fetch_model.return_value = {
+            "datasets": ["owner/data", "owner/other"],
+        }
+
+        metric = DatasetQuality()
+        dataset_id = metric._extract_dataset_id(
+            {"model_url": "https://huggingface.co/acme/model"}
+        )
+
+        self.assertEqual(dataset_id, "owner/data")
+        mock_fetch_model.assert_called_once_with("acme/model")
+
+    @patch("src.Metrics.HFClient")
+    def test_count_models_for_dataset_dedupes_results(
+        self,
+        mock_hf_client_cls: MagicMock,
+    ) -> None:
+        metric = DatasetQuality()
+        mock_client = mock_hf_client_cls.return_value
+        mock_client.request.side_effect = [
+            [{"modelId": "org/model-a"}, {"modelId": "org/model-b"}],
+            [{"modelId": "org/model-b"}, {"modelId": None}],
+            [{"modelId": "org/model-c"}],
+            [{"modelId": "org/model-a"}],
+        ]
+
+        total = metric.count_models_for_dataset("owner/data", limit=10)
+
+        self.assertEqual(total, 3)
+        self.assertEqual(mock_client.request.call_count, 4)
+
+        filters = {
+            call.kwargs["params"]["filter"]
+            for call in mock_client.request.call_args_list
+        }
+        self.assertSetEqual(
+            filters,
+            {"data", "dataset:data", "owner/data", "dataset:owner/data"},
+        )
+        for call in mock_client.request.call_args_list:
+            self.assertEqual(call.args[:2], ("GET", "/api/models"))
+            self.assertEqual(call.kwargs["params"]["limit"], 10)
 
 
 class TestAvailabilityMetric(unittest.TestCase):

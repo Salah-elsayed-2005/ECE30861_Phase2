@@ -5,7 +5,8 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
+from urllib.parse import quote, urlparse
 
 from src.Client import GrokClient, HFClient
 from src.utils import browse_hf_repo, injectHFBrowser
@@ -626,3 +627,375 @@ class AvailabilityMetric(Metric):
         # print(self.last_details)
 
         return score
+
+
+class DatasetQuality(Metric):
+    """
+    Evaluate dataset quality by combining reuse and community engagement.
+
+    The metric inspects Hugging Face metadata to determine how often a
+    dataset is reused across models and how many likes it has accrued,
+    yielding a bounded score that favors broad adoption.
+    """
+
+    name = "Dataset Quality"
+    key = "dataset_quality"
+
+    def __init__(self, hf_client: Optional[HFClient] = None) -> None:
+        self.hf_client = HFClient(max_requests=100)
+        self.last_details: dict[str, Any] = {}
+
+    def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
+        """
+        Score a dataset by blending reuse counts with community likes.
+
+        Parameters
+        ----------
+        inputs : dict[str, Any]
+            Parser output that may contain dataset and/or model URLs.
+        **kwargs : Any
+            Unused placeholder for interface compatibility.
+
+        Returns
+        -------
+        float
+            Weighted dataset quality score clamped to ``[0.0, 1.0]``.
+        """
+
+        # Step 1: resolve which dataset we should inspect
+        dataset_id = self._extract_dataset_id(inputs)
+        if not dataset_id:
+            self.last_details = {"reason": "dataset_not_found"}
+            return 0.0
+
+        # Step 2: pull the dataset metadata from Hugging Face
+        payload = self._fetch_dataset(dataset_id)
+        if payload is None:
+            self.last_details = {
+                "dataset_id": dataset_id,
+                "reason": "hf_api_error",
+            }
+            return 0.0
+
+        likes = self._safe_int(payload.get("likes"))
+        use_count = self.count_models_for_dataset(dataset_id)
+
+        # Step 3: convert engagement numbers into bounded scores
+        likes_score = self._squash_score(likes, scale=250)
+        use_score = self._squash_score(use_count, scale=40)
+
+        score = (0.6 * use_score) + (0.4 * likes_score)
+        score = max(0.0, min(1.0, score))
+
+        self.last_details = {
+            "dataset_id": dataset_id,
+            "likes": likes,
+            "use_count": use_count,
+            "likes_score": likes_score,
+            "use_score": use_score,
+        }
+        return score
+
+    def _extract_dataset_id(self, inputs: Mapping[str, Any]) -> Optional[str]:
+        """
+        Resolve the primary dataset slug from parser output or model metadata.
+
+        Parameters
+        ----------
+        inputs : Mapping[str, Any]
+            Parsed artifacts describing the model and any referenced datasets.
+
+        Returns
+        -------
+        Optional[str]
+            Normalized ``owner/name`` dataset slug, or ``None`` when absent.
+        """
+        # Prefer explicit dataset URLs that the parser already categorized.
+        dataset_url = inputs.get("dataset_url")
+        if isinstance(dataset_url, str):
+            slug = self._dataset_slug_from_url(dataset_url)
+            if slug:
+                return slug
+
+        # Fall back to inspecting the referenced model's metadata.
+        model_url = inputs.get("model_url")
+        if not isinstance(model_url, str):
+            return None
+
+        model_id = self._model_id_from_url(model_url)
+        if not model_id:
+            return None
+
+        model_info = self._fetch_model(model_id)
+        if not isinstance(model_info, Mapping):
+            return None
+
+        candidates: list[Any] = []
+        # Older model cards advertise datasets under these top-level keys.
+        candidates.extend([model_info.get("dataset"),
+                           model_info.get("datasets")])
+        card = model_info.get("cardData")
+        if isinstance(card, Mapping):
+            # Newer model cards store richer data inside ``cardData``.
+            candidates.extend([card.get("dataset"), card.get("datasets")])
+        for candidate in candidates:
+            slug = self._first_dataset_slug(candidate)
+            if slug:
+                return slug
+
+        tags = model_info.get("tags")
+        if isinstance(tags, list):
+            for tag in tags:
+                if isinstance(tag, str) and tag.startswith("datasets:"):
+                    # Tags occasionally encode dataset information,
+                    # e.g. "datasets:mnist".
+                    ref = tag.split(":", 1)[1]
+                    slug = self._normalize_dataset_reference(ref)
+                    if slug:
+                        return slug
+
+        return None
+
+    def _fetch_dataset(self, dataset_id: str) -> Optional[Mapping[str, Any]]:
+        """
+        Fetch dataset metadata for ``dataset_id`` via the Hugging Face API.
+
+        Parameters
+        ----------
+        dataset_id : str
+            Normalized dataset slug (``owner/name``) to request from the API.
+
+        Returns
+        -------
+        Optional[Mapping[str, Any]]
+            Parsed dataset payload, or ``None`` if the request fails.
+        """
+        try:
+            data = self.hf_client.request(
+                "GET",
+                f"/api/datasets/{quote(dataset_id, safe='/@.-')}",
+            )
+        except Exception:
+            return None
+        return data if isinstance(data, Mapping) else None
+
+    def _fetch_model(self, model_id: str) -> Optional[Mapping[str, Any]]:
+        """
+        Fetch model metadata so we can inspect the declared datasets.
+
+        Parameters
+        ----------
+        model_id : str
+            Normalized model slug (``owner/name``) to request from the API.
+
+        Returns
+        -------
+        Optional[Mapping[str, Any]]
+            Parsed model payload, or ``None`` when the request fails.
+        """
+        try:
+            data = self.hf_client.request(
+                "GET",
+                f"/api/models/{quote(model_id, safe='/@.-')}",
+            )
+        except Exception:
+            return None
+        return data if isinstance(data, Mapping) else None
+
+    @staticmethod
+    def _safe_int(value: Any) -> int:
+        """
+        Convert ``value`` to a non-negative integer, defaulting to ``0``.
+
+        Parameters
+        ----------
+        value : Any
+            Raw value retrieved from Hugging Face metadata.
+
+        Returns
+        -------
+        int
+            Parsed integer or ``0`` if conversion fails.
+        """
+        try:
+            return max(int(value), 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _squash_score(value: int, *, scale: int) -> float:
+        """
+        Compress counts into the ``[0.0, 1.0]`` interval with log roll-off.
+
+        Parameters
+        ----------
+        value : int
+            Raw count to transform.
+        scale : int
+            Reference value that maps to a score near ``1.0``.
+
+        Returns
+        -------
+        float
+            Log-scaled score bounded to ``[0.0, 1.0]``.
+        """
+        if value <= 0 or scale <= 0:
+            return 0.0
+        return min(1.0, math.log1p(value) / math.log1p(scale))
+
+    def _first_dataset_slug(self, value: Any) -> Optional[str]:
+        """
+        Return the first normalized dataset slug contained in ``value``.
+
+        Parameters
+        ----------
+        value : Any
+            String or list originating from model metadata.
+
+        Returns
+        -------
+        Optional[str]
+            Normalized ``owner/name`` slug, or ``None`` if none are found.
+        """
+        if isinstance(value, str):
+            return self._normalize_dataset_reference(value)
+        if isinstance(value, list):
+            for item in value:
+                slug = self._normalize_dataset_reference(item)
+                if slug:
+                    return slug
+        return None
+
+    def _normalize_dataset_reference(self, reference: Any) -> Optional[str]:
+        """
+        Normalize free-form dataset references into ``owner/name`` format.
+
+        Parameters
+        ----------
+        reference : Any
+            Arbitrary dataset hint collected from metadata or tags.
+
+        Returns
+        -------
+        Optional[str]
+            Normalized dataset slug suitable for API requests.
+        """
+        if not isinstance(reference, str):
+            return None
+        text = reference.strip()
+        if not text:
+            return None
+        if text.startswith("datasets:"):
+            text = text.split(":", 1)[1]
+        if text.startswith("http://") or text.startswith("https://"):
+            return self._dataset_slug_from_url(text)
+        if text.startswith("huggingface.co/"):
+            return self._dataset_slug_from_url(f"https://{text}")
+        if "/" in text:
+            parts = [p for p in text.split("/") if p]
+            if len(parts) >= 2:
+                return f"{parts[0]}/{parts[1]}"
+            if parts:
+                return parts[0]
+        return None
+
+    @staticmethod
+    def _dataset_slug_from_url(url: str) -> Optional[str]:
+        """
+        Extract ``owner/name`` slug from a Hugging Face dataset URL.
+
+        Parameters
+        ----------
+        url : str
+            Dataset URL copied from the Hub.
+
+        Returns
+        -------
+        Optional[str]
+            Normalized slug when extraction succeeds, else ``None``.
+        """
+        parsed = urlparse(url)
+        path = parsed.path.strip("/")
+        if not path:
+            return None
+        if path.startswith("datasets/"):
+            path = path[len("datasets/"):]
+        segments = [
+            seg for seg in path.split("/")
+            if seg not in {"blob", "tree", "resolve", "main", "raw", "viewer"}
+        ]
+        if not segments:
+            return None
+        if len(segments) >= 2:
+            return f"{segments[0]}/{segments[1]}"
+        return segments[0]
+
+    @staticmethod
+    def _model_id_from_url(url: str) -> Optional[str]:
+        """
+        Extract ``owner/name`` slug from a Hugging Face model URL.
+
+        Parameters
+        ----------
+        url : str
+            Model URL copied from the Hub.
+
+        Returns
+        -------
+        Optional[str]
+            Normalized slug when extraction succeeds, else ``None``.
+        """
+        parsed = urlparse(url)
+        path = parsed.path.strip("/")
+        if not path or path.startswith("datasets/"):
+            return None
+        parts = [part for part in path.split("/") if part]
+        if not parts:
+            return None
+        if len(parts) >= 2:
+            return f"{parts[0]}/{parts[1]}"
+        return parts[0]
+
+    def count_models_for_dataset(self, dataset_id: str,
+                                 limit: int = 1000) -> int:
+        """
+        Count models on the Hub that self-report using ``dataset_id``.
+
+        Parameters
+        ----------
+        dataset_id : str
+            Normalized dataset slug to pass through the Hub filters.
+        limit : int, optional
+            Maximum number of results to request per API call,
+            by default ``1000``.
+
+        Returns
+        -------
+        int
+            Unique model count associated with the dataset.
+        """
+        slug = dataset_id.split("/")[-1]
+
+        # Common ways authors tag datasets in model cards
+        filters: Iterable[str] = {
+            slug,                          # e.g. "imagenet-1k"
+            f"dataset:{slug}",             # e.g. "dataset:imagenet-1k"
+            dataset_id,                    # e.g. "ILSVRC/imagenet-1k"
+            f"dataset:{dataset_id}",       # e.g. "dataset:ILSVRC/imagenet-1k"
+        }
+
+        seen: set[str] = set()
+        for f in filters:
+            models: list[dict[str, Any]] = self.hf_client.request(
+                "GET",
+                "/api/models",
+                params={"filter": f, "limit": limit}
+            )
+            for m in models:
+                mid = m.get("modelId")
+                if mid:
+                    # Track models uniquely to avoid
+                    # double-counting across filters.
+                    seen.add(mid)
+
+        return len(seen)
