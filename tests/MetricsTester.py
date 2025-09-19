@@ -4,8 +4,8 @@ import unittest
 from dataclasses import FrozenInstanceError
 from unittest.mock import MagicMock, patch
 
-from src.Metrics import (LicenseMetric, Metric, MetricResult, RampUpTime,
-                         SizeMetric)
+from src.Metrics import (AvailabilityMetric, LicenseMetric, Metric,
+                         MetricResult, RampUpTime, SizeMetric)
 
 
 class TestMetricResult(unittest.TestCase):
@@ -308,6 +308,102 @@ class TestLicenseMetric(unittest.TestCase):
 
         self.assertEqual(score, 0.75)
         self.assertEqual(mock_grok.llm.call_count, 2)
+
+
+class TestAvailabilityMetric(unittest.TestCase):
+    """Test the AvailabilityMetric logic around dataset and code discovery."""
+
+    @patch("src.Metrics.injectHFBrowser")
+    @patch("src.Metrics.GrokClient")
+    def test_requires_model_url(
+        self,
+        _mock_grok_cls: MagicMock,
+        _mock_inject: MagicMock,
+    ) -> None:
+        metric = AvailabilityMetric()
+        with self.assertRaises(ValueError):
+            metric.compute({})
+
+    @patch.object(AvailabilityMetric, "_llm_detect_availability")
+    @patch("src.Metrics.injectHFBrowser")
+    @patch("src.Metrics.GrokClient")
+    def test_compute_scores_partial_availability(
+        self,
+        _mock_grok_cls: MagicMock,
+        mock_inject: MagicMock,
+        mock_detect: MagicMock,
+    ) -> None:
+        metric = AvailabilityMetric()
+        url = "https://huggingface.co/org/model"
+        mock_inject.return_value = "rendered page text"
+        mock_detect.return_value = (True, False, "dataset link", "")
+
+        score = metric.compute({"model_url": url})
+
+        self.assertEqual(score, 0.5)
+        mock_inject.assert_called_once_with(url)
+        mock_detect.assert_called_once_with("rendered page text")
+        self.assertEqual(
+            metric.last_details,
+            {
+                "dataset_available": True,
+                "codebase_available": False,
+                "dataset_evidence": "dataset link",
+                "codebase_evidence": "",
+            },
+        )
+
+    @patch.object(AvailabilityMetric, "_llm_detect_availability")
+    @patch("src.Metrics.injectHFBrowser")
+    @patch("src.Metrics.GrokClient")
+    def test_compute_scores_full_availability(
+        self,
+        _mock_grok_cls: MagicMock,
+        mock_inject: MagicMock,
+        mock_detect: MagicMock,
+    ) -> None:
+        metric = AvailabilityMetric()
+        url = "https://huggingface.co/org/model"
+        mock_inject.return_value = "full model card"
+        mock_detect.return_value = (True, True, "data url", "code repo")
+
+        score = metric.compute({"model_url": url})
+
+        self.assertEqual(score, 1.0)
+        mock_inject.assert_called_once_with(url)
+        mock_detect.assert_called_once_with("full model card")
+        self.assertEqual(
+            metric.last_details,
+            {
+                "dataset_available": True,
+                "codebase_available": True,
+                "dataset_evidence": "data url",
+                "codebase_evidence": "code repo",
+            },
+        )
+
+    @patch("src.Metrics.GrokClient")
+    def test_llm_detection_fallback_uses_heuristics(
+        self,
+        mock_grok_cls: MagicMock,
+    ) -> None:
+        metric = AvailabilityMetric()
+        mock_grok = mock_grok_cls.return_value
+        mock_grok.llm.side_effect = ValueError("LLM unavailable")
+
+        snippet = (
+            "Trained on https://huggingface.co/datasets/acme/data "
+            "with source code at https://github.com/acme/model"
+        )
+
+        dataset, codebase, dataset_ev, codebase_ev = (
+            metric._llm_detect_availability(snippet)
+        )
+
+        self.assertTrue(dataset)
+        self.assertTrue(codebase)
+        self.assertIn("huggingface.co/datasets/acme/data", dataset_ev)
+        self.assertIn("github.com/acme/model", codebase_ev)
 
 
 if __name__ == "__main__":
