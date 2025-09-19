@@ -3,8 +3,8 @@
 import sys
 
 from src.Dispatcher import Dispatcher
-from src.Metrics import (AvailabilityMetric, LicenseMetric, RampUpTime,
-                         SizeMetric, DatasetQuality)
+from src.Metrics import (AvailabilityMetric, DatasetQuality, LicenseMetric,
+                         RampUpTime, SizeMetric)
 from src.Parser import Parser
 
 if __name__ == "__main__":

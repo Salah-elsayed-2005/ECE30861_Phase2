@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Iterable
+from typing import Any, Iterable, Mapping, Optional
 from urllib.parse import quote, urlparse
 
 from src.Client import GrokClient, HFClient
