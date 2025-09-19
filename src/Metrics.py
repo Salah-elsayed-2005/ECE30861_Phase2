@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Iterable
 from urllib.parse import quote, urlparse
 
 from src.Client import GrokClient, HFClient
@@ -732,7 +732,8 @@ class DatasetQuality(Metric):
 
         candidates: list[Any] = []
         # Older model cards advertise datasets under these top-level keys.
-        candidates.extend([model_info.get("dataset"), model_info.get("datasets")])
+        candidates.extend([model_info.get("dataset"),
+                           model_info.get("datasets")])
         card = model_info.get("cardData")
         if isinstance(card, Mapping):
             # Newer model cards store richer data inside ``cardData``.
@@ -746,8 +747,10 @@ class DatasetQuality(Metric):
         if isinstance(tags, list):
             for tag in tags:
                 if isinstance(tag, str) and tag.startswith("datasets:"):
-                    # Tags occasionally encode dataset information, e.g. "datasets:mnist".
-                    slug = self._normalize_dataset_reference(tag.split(":", 1)[1])
+                    # Tags occasionally encode dataset information,
+                    # e.g. "datasets:mnist".
+                    ref = tag.split(":", 1)[1]
+                    slug = self._normalize_dataset_reference(ref)
                     if slug:
                         return slug
 
@@ -953,7 +956,8 @@ class DatasetQuality(Metric):
             return f"{parts[0]}/{parts[1]}"
         return parts[0]
 
-    def count_models_for_dataset(self, dataset_id: str, limit: int = 1000) -> int:
+    def count_models_for_dataset(self, dataset_id: str,
+                                 limit: int = 1000) -> int:
         """
         Count models on the Hub that self-report using ``dataset_id``.
 
@@ -962,7 +966,8 @@ class DatasetQuality(Metric):
         dataset_id : str
             Normalized dataset slug to pass through the Hub filters.
         limit : int, optional
-            Maximum number of results to request per API call, by default ``1000``.
+            Maximum number of results to request per API call,
+            by default ``1000``.
 
         Returns
         -------
@@ -989,7 +994,8 @@ class DatasetQuality(Metric):
             for m in models:
                 mid = m.get("modelId")
                 if mid:
-                    # Track models uniquely to avoid double-counting across filters.
+                    # Track models uniquely to avoid
+                    # double-counting across filters.
                     seen.add(mid)
 
         return len(seen)

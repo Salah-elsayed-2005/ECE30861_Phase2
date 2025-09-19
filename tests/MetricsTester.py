@@ -311,7 +311,7 @@ class TestLicenseMetric(unittest.TestCase):
 
 
 class TestDatasetQualityMetric(unittest.TestCase):
-    """Test the DatasetQuality metric without touching real Hugging Face APIs."""
+    """Test the DatasetQuality metric w/o touching real Hugging Face APIs."""
 
     @patch("src.Metrics.HFClient")
     def test_compute_returns_zero_when_dataset_missing(
