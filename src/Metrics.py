@@ -2,13 +2,19 @@
 # THIS CODE WILL HANDLE THE METRIC OBJECTS
 from __future__ import annotations
 
+import ast
 import math
+import re
+import subprocess
+import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
+from textwrap import shorten
 from typing import Any, Iterable, Mapping, Optional
 from urllib.parse import quote, urlparse
 
-from src.Client import GrokClient, HFClient
+from src.Client import GitClient, GrokClient, HFClient
 from src.utils import browse_hf_repo, injectHFBrowser
 
 
@@ -601,7 +607,7 @@ class AvailabilityMetric(Metric):
         ValueError
             If 'model_url' is missing from inputs.
         """
-        if "model_url" not in inputs:
+        if "model_url" not in inputs.keys():
             raise ValueError("Model link not found in input dictionary")
 
         url = inputs["model_url"]
@@ -986,11 +992,16 @@ class DatasetQuality(Metric):
 
         seen: set[str] = set()
         for f in filters:
-            models: list[dict[str, Any]] = self.hf_client.request(
-                "GET",
-                "/api/models",
-                params={"filter": f, "limit": limit}
-            )
+            try:
+                models: list[dict[str, Any]] = self.hf_client.request(
+                    "GET",
+                    "/api/models",
+                    params={"filter": f, "limit": limit}
+                )
+            except Exception:
+                continue
+            if not isinstance(models, list):
+                continue
             for m in models:
                 mid = m.get("modelId")
                 if mid:
@@ -999,3 +1010,536 @@ class DatasetQuality(Metric):
                     seen.add(mid)
 
         return len(seen)
+
+
+class CodeQuality(Metric):
+    """
+    Assess codebases by combining lint heuristics, typing coverage,
+    and LLM judgment.
+
+    The metric fetches Python sources linked from a model card or explicit
+    repository URL, runs lightweight static checks, and asks an LLM to
+    estimate engineering quality. When no code is available, it falls back
+    to interpreting the model card alone.
+    """
+
+    name = "Code Quality"
+    key = "code_quality"
+
+    def __init__(
+        self,
+        hf_client: Optional[HFClient] = None,
+        grok_client: Optional[GrokClient] = None,
+    ) -> None:
+        self.hf_client = hf_client or HFClient(max_requests=10)
+        self.grok = grok_client or GrokClient(max_requests=100)
+        self.last_details: dict[str, Any] = {}
+
+    def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
+        """
+        Resolve source code, analyse it, and optionally fall back to the
+        model card.
+
+        Parameters
+        ----------
+        inputs : dict[str, Any]
+            Parser output that may include ``git_url`` or ``model_url``
+            pointing to the codebase or model card.
+        **kwargs : Any
+            Placeholder for interface compatibility; unused.
+
+        Returns
+        -------
+        float
+            Aggregate quality score bounded to ``[0.0, 1.0]``.
+        """
+
+        code_files, origin, card_text = self._load_code(inputs)
+        if code_files:
+            lint_score = self._lint_score(code_files)
+            typing_score = self._typing_score(code_files)
+            llm_score = self._llm_code_rating(code_files)
+            score = (lint_score + typing_score + llm_score) / 3.0
+            score = max(0.0, min(1.0, score))
+
+            self.last_details = {
+                "origin": origin,
+                "lint_score": lint_score,
+                "typing_score": typing_score,
+                "llm_score": llm_score,
+                "file_count": len(code_files),
+            }
+            return score
+
+        model_url = inputs.get("model_url")
+        if not card_text and isinstance(model_url, str):
+            card_text = self._model_card_text(model_url)
+        fallback_score = self._llm_card_rating(card_text)
+        self.last_details = {
+            "origin": "model_card",
+            "llm_score": fallback_score,
+            "card_available": bool(card_text),
+        }
+        return fallback_score
+
+    # ------------------------------------------------------------------
+    # Source resolution helpers
+    # ------------------------------------------------------------------
+    def _load_code(
+        self,
+        inputs: Mapping[str, Any],
+    ) -> tuple[dict[str, str], str, str]:
+        """
+        Locate Python sources and return them alongside provenance
+        metadata.
+
+        Parameters
+        ----------
+        inputs : Mapping[str, Any]
+            Parser artefacts containing potential ``git_url`` or
+            ``model_url`` keys.
+
+        Returns
+        -------
+        tuple[dict[str, str], str, str]
+            Mapping of relative paths to file contents, the origin label,
+            and any cached model card text for reuse when code is
+            unavailable.
+        """
+
+        card_text = ""
+        git_url = inputs.get("git_url")
+        if isinstance(git_url, str):
+            files = self._load_from_github(git_url)
+            if files:
+                return files, "github", card_text
+
+        model_url = inputs.get("model_url")
+        if isinstance(model_url, str):
+            card_text = self._model_card_text(model_url)
+            gh_url = self._github_from_card(card_text)
+            if gh_url:
+                files = self._load_from_github(gh_url)
+                if files:
+                    return files, "github_from_card", card_text
+
+        return {}, "", card_text
+
+    def _load_from_github(
+        self,
+        url: str,
+        *,
+        limit: int = 20,
+    ) -> dict[str, str]:
+        """
+        Clone a GitHub repository and read a bounded set of Python files.
+
+        Parameters
+        ----------
+        url : str
+            HTTPS URL to the GitHub repository.
+        limit : int, optional
+            Maximum number of Python files to ingest, defaults to ``20``.
+
+        Returns
+        -------
+        dict[str, str]
+            Mapping of relative file paths to their source text.
+        """
+
+        with tempfile.TemporaryDirectory(prefix="code-metric-") as tmpdir:
+            dest = Path(tmpdir) / "repo"
+            if not self._clone_repo(url, dest):
+                return {}
+            return self._read_python_files(dest, limit=limit)
+
+    def _clone_repo(self, url: str, dest: Path) -> bool:
+        """
+        Clone ``url`` into ``dest`` and signal success.
+
+        Parameters
+        ----------
+        url : str
+            Git repository URL to clone.
+        dest : Path
+            Filesystem path where the shallow clone should be created.
+
+        Returns
+        -------
+        bool
+            ``True`` when the clone completes, otherwise ``False``.
+        """
+
+        try:
+            subprocess.run(
+                ["git", "clone", "--depth", "1", url, str(dest)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=45,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return False
+        return True
+
+    def _read_python_files(self, root: Path, *, limit: int) -> dict[str, str]:
+        """
+        Collect up to ``limit`` tracked Python files from ``root``.
+
+        Parameters
+        ----------
+        root : Path
+            Directory containing the cloned repository.
+        limit : int
+            Maximum number of files to return.
+
+        Returns
+        -------
+        dict[str, str]
+            Mapping of relative file paths to their corresponding source text.
+        """
+
+        candidates: list[str] = []
+        try:
+            git_client = GitClient(max_requests=100, repo_path=str(root))
+            candidates = [
+                path
+                for path in git_client.list_files()
+                if path.endswith(".py")
+            ]
+        except Exception:
+            candidates = []
+
+        if not candidates:
+            candidates = [
+                str(path.relative_to(root))
+                for path in sorted(root.rglob("*.py"))
+            ]
+
+        results: dict[str, str] = {}
+        for rel_path in candidates:
+            if len(results) >= limit:
+                break
+            path = root / rel_path
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if text.strip():
+                results[rel_path] = text
+        return results
+
+    def _github_from_card(self, card_text: str) -> Optional[str]:
+        """
+        Extract a GitHub repository link from rendered model card text.
+
+        Parameters
+        ----------
+        card_text : str
+            Full model card contents sourced from Hugging Face.
+
+        Returns
+        -------
+        Optional[str]
+            First matching GitHub URL if present, else ``None``.
+        """
+
+        if not card_text:
+            return None
+        match = re.search(
+            r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
+            card_text,
+        )
+        return match.group(0) if match else None
+
+    # ------------------------------------------------------------------
+    # Static analysis helpers
+    # ------------------------------------------------------------------
+    def _lint_score(self, code_files: Mapping[str, str]) -> float:
+        """
+        Approximate lint quality using lightweight style heuristics.
+
+        Parameters
+        ----------
+        code_files : Mapping[str, str]
+            Mapping of file paths to Python source text.
+
+        Returns
+        -------
+        float
+            Heuristic lint compliance score within ``[0.0, 1.0]``.
+        """
+
+        total = 0
+        issues = 0
+
+        for text in code_files.values():
+            for raw_line in text.splitlines():
+                stripped = raw_line.rstrip("\n")
+                if not stripped.strip():
+                    continue
+
+                total += 1
+                failure = False
+
+                if len(stripped) > 100:
+                    failure = True
+                if stripped.rstrip() != stripped:
+                    failure = True
+                if "\t" in stripped:
+                    failure = True
+
+                leading_spaces = len(stripped) - len(stripped.lstrip(" "))
+                if leading_spaces and leading_spaces % 4 != 0:
+                    failure = True
+
+                if failure:
+                    issues += 1
+
+        if total == 0:
+            return 0.5
+        compliant_ratio = 1.0 - (issues / total)
+        # Anything below 90% compliant is treated as a failure, and
+        # 100% compliant receives full credit. Linearly scale in-between.
+        return max(0.0, min(1.0, (compliant_ratio - 0.9) / 0.1))
+
+    def _typing_score(self, code_files: Mapping[str, str]) -> float:
+        """
+        Measure the proportion of functions that provide complete type hints.
+
+        Parameters
+        ----------
+        code_files : Mapping[str, str]
+            Mapping of file paths to Python source text.
+
+        Returns
+        -------
+        float
+            Fraction of typed functions; defaults to ``0.5`` when none found.
+        """
+
+        total_funcs = 0
+        typed_funcs = 0
+
+        for text in code_files.values():
+            try:
+                tree = ast.parse(text)
+            except SyntaxError:
+                continue
+
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    total_funcs += 1
+                    if self._function_is_typed(node):
+                        typed_funcs += 1
+
+        if total_funcs == 0:
+            return 0.5
+        return typed_funcs / total_funcs
+
+    def _function_is_typed(self, node: ast.AST) -> bool:
+        """
+        Determine whether a function annotates all parameters and the
+        return value.
+
+        Parameters
+        ----------
+        node : ast.AST
+            Function definition node extracted from the AST.
+
+        Returns
+        -------
+        bool
+            ``True`` when every parameter and the return value are
+            annotated.
+        """
+
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return False
+
+        params = list(node.args.posonlyargs) + list(node.args.args)
+        if params and params[0].arg in {"self", "cls"}:
+            params = params[1:]
+
+        params += list(node.args.kwonlyargs)
+
+        for param in params:
+            if param.annotation is None:
+                return False
+
+        if node.args.vararg and node.args.vararg.annotation is None:
+            return False
+        if node.args.kwarg and node.args.kwarg.annotation is None:
+            return False
+
+        return node.returns is not None
+
+    # ------------------------------------------------------------------
+    # LLM helpers
+    # ------------------------------------------------------------------
+    def _llm_code_rating(self, code_files: Mapping[str, str]) -> float:
+        """
+        Ask the Grok LLM to assess engineering quality of the provided code.
+
+        Parameters
+        ----------
+        code_files : Mapping[str, str]
+            Mapping of file paths to Python source text.
+
+        Returns
+        -------
+        float
+            Parsed LLM rating normalized to ``[0.0, 1.0]``; defaults to
+            ``0.5`` when the snippet is empty or the request fails.
+        """
+
+        snippet = self._code_snippet(code_files)
+        if not snippet:
+            return 0.5
+
+        prompt = (
+            "Rate the following Python code's engineering quality on a "
+            "scale from 0 to 1, where 0 is extremely poor and 1 is "
+            "excellent. Consider readability, structure, tests, and "
+            "maintainability. Respond with only the numeric rating.\n\n"
+            f"```python\n{snippet}\n```"
+        )
+
+        try:
+            raw = self.grok.llm(prompt)
+            return self._parse_llm_score(raw)
+        except Exception:
+            return 0.5
+
+    def _llm_card_rating(self, card_text: str) -> float:
+        """
+        Generate a fallback LLM-based quality score from model card text.
+
+        Parameters
+        ----------
+        card_text : str
+            Rendered model card contents.
+
+        Returns
+        -------
+        float
+            Parsed LLM rating in ``[0.0, 1.0]``; defaults to ``0.3`` on
+            failure.
+        """
+
+        if not card_text:
+            return 0.3
+
+        prompt = (
+            "Based on this Hugging Face model card, estimate the quality "
+            "of the associated codebase. Return a number between 0 and 1 "
+            "(0=very poor, 1=excellent). Respond with only the numeric "
+            "rating.\n\n"
+            f"{shorten(card_text, width=3500, placeholder='...')}"
+        )
+
+        try:
+            raw = self.grok.llm(prompt)
+            return self._parse_llm_score(raw)
+        except Exception:
+            return 0.3
+
+    def _code_snippet(
+        self,
+        code_files: Mapping[str, str],
+        *,
+        limit: int = 3500,
+    ) -> str:
+        """
+        Concatenate a bounded sample of code to feed into the LLM prompt.
+
+        Parameters
+        ----------
+        code_files : Mapping[str, str]
+            Mapping of file paths to Python source text.
+        limit : int, optional
+            Maximum number of characters to include, defaults to ``3500``.
+
+        Returns
+        -------
+        str
+            Truncated multi-file snippet formatted for LLM consumption.
+        """
+
+        pieces: list[str] = []
+        remaining = limit
+
+        for path, text in code_files.items():
+            header = f"# File: {path}\n"
+            budget = max(0, remaining - len(header))
+            if budget <= 0:
+                break
+            body = text.strip()
+            snippet = body[:budget]
+            pieces.append(header + snippet)
+            remaining -= len(header) + len(snippet)
+            if remaining <= 0:
+                break
+
+        return "\n\n".join(pieces)
+
+    def _parse_llm_score(self, raw: Any) -> float:
+        """
+        Parse a numeric score from the LLM response text.
+
+        Parameters
+        ----------
+        raw : Any
+            Value returned by the LLM client.
+
+        Returns
+        -------
+        float
+            Clamped numeric score with ``0.5`` as the fallback when
+            parsing fails.
+        """
+
+        if raw is None:
+            return 0.5
+        text = str(raw).strip()
+        try:
+            value = float(text.split()[0])
+        except (ValueError, IndexError):
+            return 0.5
+        return max(0.0, min(1.0, value))
+
+    def _model_card_text(self, url: Optional[str]) -> str:
+        """
+        Retrieve model card text via the Hugging Face API or browser helper.
+
+        Parameters
+        ----------
+        url : Optional[str]
+            Hugging Face model URL from which to fetch the card.
+
+        Returns
+        -------
+        str
+            Markdown or HTML card contents, or an empty string when
+            unavailable.
+        """
+
+        if not url:
+            return ""
+        model_id = DatasetQuality._model_id_from_url(url)
+        if model_id:
+            try:
+                data = self.hf_client.request(
+                    "GET",
+                    f"/{model_id}/resolve/main/README.md",
+                )
+                if isinstance(data, bytes):
+                    data = data.decode("utf-8", errors="ignore")
+                if isinstance(data, str) and data.strip():
+                    return data
+            except Exception:
+                pass
+        try:
+            return injectHFBrowser(url)
+        except Exception:
+            return ""
