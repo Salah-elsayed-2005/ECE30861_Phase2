@@ -3,8 +3,8 @@
 import sys
 
 from src.Dispatcher import Dispatcher
-from src.Metrics import (AvailabilityMetric, DatasetQuality, LicenseMetric,
-                         RampUpTime, SizeMetric)
+from src.Metrics import (AvailabilityMetric, CodeQuality, DatasetQuality,
+                         LicenseMetric, RampUpTime, SizeMetric)
 from src.Parser import Parser
 
 if __name__ == "__main__":
@@ -15,6 +15,10 @@ if __name__ == "__main__":
                              SizeMetric(),
                              RampUpTime(),
                              AvailabilityMetric(),
-                             DatasetQuality()])
+                             DatasetQuality(),
+                             CodeQuality()])
     results = dispatcher.dispatch(parse.getGroups())
     print(results)
+    print("\n\n")
+    for res in results:
+        print(f"{res.metric}: {res.value}")
