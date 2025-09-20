@@ -895,10 +895,14 @@ class TestAvailabilityMetric(unittest.TestCase):
             },
         )
 
-    def test_llm_detect_availability_parses_llm_json(self) -> None:
+    @patch("src.Metrics.GrokClient")
+    def test_llm_detect_availability_parses_llm_json(
+        self,
+        mock_grok_cls: MagicMock,
+    ) -> None:
         metric = AvailabilityMetric()
-        metric.grok = MagicMock()
-        metric.grok.llm.return_value = (
+        grok_mock = mock_grok_cls.return_value
+        grok_mock.llm.return_value = (
             "```json\n"
             "{\n"
             '  "dataset_available": true,\n'
@@ -917,9 +921,13 @@ class TestAvailabilityMetric(unittest.TestCase):
         self.assertFalse(codebase)
         self.assertEqual(dataset_ev, "https://huggingface.co/datasets/demo")
         self.assertEqual(codebase_ev, "")
-        metric.grok.llm.assert_called_once()
+        grok_mock.llm.assert_called_once()
 
-    def test_llm_detect_availability_handles_empty_text(self) -> None:
+    @patch("src.Metrics.GrokClient")
+    def test_llm_detect_availability_handles_empty_text(
+        self,
+        _mock_grok_cls: MagicMock,
+    ) -> None:
         metric = AvailabilityMetric()
 
         dataset, codebase, dataset_ev, codebase_ev = (
