@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
-from src.Client import GrokClient, HFClient
+from src.Client import GrokClient, HFClient, GitClient
 from src.utils import browse_hf_repo, injectHFBrowser
 
 
@@ -628,176 +628,6 @@ class AvailabilityMetric(Metric):
         return score
 
 
-class AvailabilityMetric(Metric):
-    """
-    Metric that checks whether a model has an associated dataset and codebase
-    available. Awards 0.5 for each item found via the model card.
-
-    This metric uses Selenium (via ``injectHFBrowser``) to retrieve the full
-    rendered model page text and a Grok LLM to identify mentions/links to an
-    available dataset and an available code repository.
-    """
-
-    name = "Availability"
-    key = "availability_metric"
-
-    def __init__(self) -> None:
-        self.grok = GrokClient(max_requests=100)
-        self.last_details: dict[str, Any] = {}
-
-    def _llm_detect_availability(self, page_text: str) \
-            -> tuple[bool, bool, str, str]:
-        """
-        Use the Grok LLM to determine whether the page text indicates a
-        dataset and/or a codebase are available.
-
-        Parameters
-        ----------
-        page_text : str
-            Visible text of the Hugging Face model page.
-
-        Returns
-        -------
-        tuple[bool, bool, str, str]
-            (dataset_available, codebase_available,
-            dataset_evidence, codebase_evidence).
-        """
-        if not page_text:
-            return (False, False, "", "")
-
-        prompt = f"""
-        You will be given the visible text of a Hugging Face model page.
-        Determine if BOTH of the following are PRESENT AND AVAILABLE to users:
-
-        1) A dataset: a specific dataset link/name indicating training or
-        evaluation data,
-           or a clear pointer to a dataset page (e.g.,
-           huggingface.co/datasets/...,
-           Kaggle dataset, etc.).
-           If URL, just the URL is sufficient for evidence.
-        2) A codebase: a concrete link to source code repository
-        (e.g., GitHub/GitLab/Bitbucket) or an
-           installable package with a repository reference. If URL, just the
-           URL is sufficient for evidence.
-
-        Respond STRICTLY in compact JSON with four fields:
-        {{"dataset_available": <true|false>, "codebase_available":
-        <true|false>,
-        "dataset_evidence": "<short snippet or URL>",
-        "codebase_evidence": "<short snippet or URL>"}}
-
-        Text:
-        {page_text}
-        """
-
-        try:
-            raw = self.grok.llm(prompt)
-            import json
-            text = (raw or "").strip()
-            if text.startswith("```"):
-                text = text.strip('`')
-            start = text.find("{")
-            end = text.rfind("}")
-            if start != -1 and end != -1 and end > start:
-                text = text[start:end+1]
-            obj = json.loads(text)
-            dataset = bool(obj.get("dataset_available", False))
-            codebase = bool(obj.get("codebase_available", False))
-            dataset_ev = str(obj.get("dataset_evidence", ""))[:500]
-            codebase_ev = str(obj.get("codebase_evidence", ""))[:500]
-            return (dataset, codebase, dataset_ev, codebase_ev)
-        except Exception:
-            lower = page_text.lower()
-            dataset_hits = any(
-                kw in lower for kw in [
-                    "huggingface.co/datasets/", " datasets/", "dataset:",
-                    "trained on", "training data:", "evaluation dataset",
-                    "kaggle.com/datasets", "dataset card"
-                ]
-            )
-            codebase_hits = any(
-                kw in lower for kw in [
-                    "github.com/", "gitlab.com/", "bitbucket.org/",
-                    "source code", "repository", "codebase"
-                ]
-            )
-            # Heuristic evidence snippets
-            dataset_ev = ""
-            codebase_ev = ""
-            if dataset_hits:
-                for kw in [
-                    "huggingface.co/datasets/", "kaggle.com/datasets",
-                    "dataset card", "evaluation dataset"
-                ]:
-                    idx = lower.find(kw)
-                    if idx != -1:
-                        dataset_ev = page_text[max(0, idx-40): idx+120]
-                        break
-            if codebase_hits:
-                for kw in [
-                    "github.com/", "gitlab.com/", "bitbucket.org/",
-                    "source code", "repository"
-                ]:
-                    idx = lower.find(kw)
-                    if idx != -1:
-                        codebase_ev = page_text[max(0, idx-40): idx+120]
-                        break
-            return (dataset_hits, codebase_hits, dataset_ev, codebase_ev)
-
-    def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
-        """
-        Compute the availability score based on dataset/codebase presence.
-
-        Parameters
-        ----------
-        inputs : dict[str, Any]
-            Parsed inputs required by the metric. Must include a key called
-            'model_url' with its corresponding correct link
-
-        **kwargs : Any
-            Optional per-metric tuning parameters.
-
-        Returns
-        -------
-        float
-            A score between 0.0 and 1.0. Dataset availability contributes 0.5,
-            and codebase availability contributes 0.5.
-
-        Raises
-        ------
-        ValueError
-            If 'model_url' is missing from inputs.
-        """
-        if "model_url" not in inputs:
-            raise ValueError("Model link not found in input dictionary")
-
-        url = inputs["model_url"]
-        # Retrieve full, rendered text from the model page
-        page_text = injectHFBrowser(url)
-
-        (dataset_available, codebase_available,
-         dataset_ev, codebase_ev) = self._llm_detect_availability(page_text)
-
-        score = 0.0
-        if dataset_available:
-            score += 0.5
-        if codebase_available:
-            score += 0.5
-
-        # Expose details for testing/inspection
-        self.last_details = {
-            "dataset_available": dataset_available,
-            "codebase_available": codebase_available,
-            "dataset_evidence": dataset_ev,
-            "codebase_evidence": codebase_ev,
-        }
-        # print(self.last_details)
-
-        return score
-
-
-import math
-
 class PerformanceClaimsMetric(Metric):
     """
     Metric that inspects the model card/README to detect
@@ -809,6 +639,7 @@ class PerformanceClaimsMetric(Metric):
     def __init__(self):
         self.hf_client = HFClient(max_requests=100)
         self.grok_client = GrokClient(max_requests=100)
+        self.git_client = GitClient(max_requests=100)
 
     def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
         """
@@ -833,43 +664,51 @@ class PerformanceClaimsMetric(Metric):
         RuntimeError
             If no valid HF model URL is found in the dict
         """
-        # model_url must be in the dict
-        if "model_url" not in inputs.keys():
-            raise ValueError("Model link not found in input dictionary")
+        # appropriate URL must be in the dict
+        if "model_url" not in inputs.keys() and "git_url" not in inputs.keys():
+            raise ValueError("No good link found in input dictionary")
 
-        # Extract the model id and get model info using API
-        model_id = inputs['model_url'].split("https://huggingface.co/")[-1]
-        card_data = self.hf_client.request("GET", f"/{model_id}/resolve/main/README.md")
+        # Retrieve full, rendered text from the model page
+        url = inputs["model_url"]
+        card_data = injectHFBrowser(url).splitlines()
 
-        # print(card_data)
-        
-        # Try common places for readme/long description
-        if isinstance(card_data, dict):
-            readme = card_data.get("readme") or card_data.get("readme") or ""
-        # Compose text for LLM inspection
-        inspect_text = "\n\n".join(
-            [str(card_data or ""), str(readme or "")]
+        # We can only put too much into llm input
+        # so we need to try to find text only relating benchmarks
+        ranges = []
+        for i, line in enumerate(card_data):
+            words = ["benchmark", "performance", "accuracy", "eval"]
+            if any(word in line.lower() for word in words):
+                start = max(0, i - 10)
+                end = min(len(card_data), i + 10 + 1)
+                ranges.append((start, end))
+
+        # Merge overlapping ranges
+        merged: list[list[int]] = []
+        for start, end in sorted(ranges):
+            if not merged or start > merged[-1][1]:
+                merged.append([start, end])
+            else:
+                merged[-1][1] = max(merged[-1][1], end)
+
+        # Aggregate results inot one string
+        results = ""
+        for start, end in merged:
+            results += "\n".join(card_data[start:end])
+
+        # Prompt the LLM to give score
+        prompt = (
+            f"given the following snippets from a readme: {results}"
+            "output a 1.0 if the readme contains performance claims "
+            "with benchmark results for the model. "
+            "output a 0.0 if there are no performance claims or "
+            "benchmark results. "
         )
+        response = self.grok_client.llm(prompt)
+        new_prompt = ("Given this LLM output, please extract"
+                      "the score it assigned and only output"
+                      "the number and that's it. Here is the"
+                      f"response: {response}"
+                      "the score should be either 0.0 or 1.0")
+        score = float(self.grok_client.llm(new_prompt))
 
-        # scrape text and look for words like benchmark, accuracy, eval, performance
-        # if any of these words are found, we put lines directly before or after into LLM
-
-        if "benchmark" or "performance" or "accuracy" or "eval" in inspect_text.lower():
-            print("inside")
-
-        score = 0.0
-        # Prompt the LLM to return a small describing whether benchmarks are present
-        # prompt = (
-        #     f"given this readme file: {inspect_text}"
-        #     "output a 1.0 if the readme contains performance claims "
-        #     "with benchmark results for the model. "
-        #     "output a 0.0 if there are no performance claims or "
-        #     "benchmark results. "
-        #     "ONLY output either the number 1.0 or the number 0.0. "
-        # )
-
-        # score = self.grok_client.llm(prompt)
-
-        print(score)
-
-        return float(score)
+        return score
