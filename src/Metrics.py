@@ -638,7 +638,7 @@ class PerformanceClaimsMetric(Metric):
 
     def __init__(self):
         self.hf_client = HFClient(max_requests=100)
-        self.grok_client = GrokClient(max_requests=3)
+        self.grok_client = GrokClient(max_requests=100)
 
     def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
         """
@@ -664,7 +664,7 @@ class PerformanceClaimsMetric(Metric):
             If no valid HF model URL is found in the dict
         """
         # appropriate URL must be in the dict
-        if "model_url" not in inputs.keys() and "git_url" not in inputs.keys():
+        if "model_url" not in inputs.keys():
             raise ValueError("No good link found in input dictionary")
 
         try:
@@ -679,7 +679,7 @@ class PerformanceClaimsMetric(Metric):
             url = inputs["model_url"]
             card_data = injectHFBrowser(url).splitlines()
 
-        # We can only put too much into llm input
+        # We can only put so much into llm input
         # so we need to try to find text only relating benchmarks
         ranges = []
         for i, line in enumerate(card_data):
