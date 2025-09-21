@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
-from src.Client import GrokClient, HFClient, GitClient
+from src.Client import GrokClient, HFClient
 from src.utils import browse_hf_repo, injectHFBrowser
 
 
@@ -638,8 +638,7 @@ class PerformanceClaimsMetric(Metric):
 
     def __init__(self):
         self.hf_client = HFClient(max_requests=100)
-        self.grok_client = GrokClient(max_requests=100)
-        self.git_client = GitClient(max_requests=100)
+        self.grok_client = GrokClient(max_requests=3)
 
     def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
         """
@@ -668,9 +667,17 @@ class PerformanceClaimsMetric(Metric):
         if "model_url" not in inputs.keys() and "git_url" not in inputs.keys():
             raise ValueError("No good link found in input dictionary")
 
-        # Retrieve full, rendered text from the model page
-        url = inputs["model_url"]
-        card_data = injectHFBrowser(url).splitlines()
+        try:
+            # try to get license from HFClient if possible
+            model_id = inputs['model_url'].split("https://huggingface.co/")[-1]
+            card_data = self.hf_client.request(
+                "GET",
+                f"/{model_id}/resolve/main/README.md",
+            ).splitlines()
+        except Exception:
+            # if perms needed, get rendered text from the model page
+            url = inputs["model_url"]
+            card_data = injectHFBrowser(url).splitlines()
 
         # We can only put too much into llm input
         # so we need to try to find text only relating benchmarks
@@ -678,8 +685,8 @@ class PerformanceClaimsMetric(Metric):
         for i, line in enumerate(card_data):
             words = ["benchmark", "performance", "accuracy", "eval"]
             if any(word in line.lower() for word in words):
-                start = max(0, i - 10)
-                end = min(len(card_data), i + 10 + 1)
+                start = max(0, i - 5)
+                end = min(len(card_data), i + 5 + 1)
                 ranges.append((start, end))
 
         # Merge overlapping ranges
@@ -690,16 +697,20 @@ class PerformanceClaimsMetric(Metric):
             else:
                 merged[-1][1] = max(merged[-1][1], end)
 
-        # Aggregate results inot one string
+        # Aggregate results into one string
         results = ""
         for start, end in merged:
             results += "\n".join(card_data[start:end])
+            # just in case my original limits still
+            # capture too much text:
+            if len(results) > 6000:
+                break
 
         # Prompt the LLM to give score
         prompt = (
             f"given the following snippets from a readme: {results}"
             "output a 1.0 if the readme contains performance claims "
-            "with benchmark results for the model. "
+            "with some form of benchmark test results. "
             "output a 0.0 if there are no performance claims or "
             "benchmark results. "
         )
