@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
-from src.Client import Client, GitClient, PurdueClient, HFClient
+from src.Client import Client, GitClient, HFClient, PurdueClient
 
 '''
 CLIENT TESTS

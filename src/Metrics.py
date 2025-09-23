@@ -14,7 +14,7 @@ from textwrap import shorten
 from typing import Any, Iterable, Mapping, Optional
 from urllib.parse import quote, urlparse
 
-from src.Client import GitClient, PurdueClient, HFClient
+from src.Client import GitClient, HFClient, PurdueClient
 from src.utils import browse_hf_repo, injectHFBrowser
 
 

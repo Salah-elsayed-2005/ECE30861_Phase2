@@ -211,6 +211,7 @@ class PurdueClient(Client):
         except Exception as e:  # pragma: no cover - defensive parsing
             raise RuntimeError("Unexpected Purdue API response format") from e
 
+
 class HFClient(Client):
     """
     Client for the Huggingface API that implements a per-class (process-local)
@@ -443,8 +444,4 @@ class GitClient(Client):
 
 
 if __name__ == "__main__":
-
-    grok = GrokClient(max_requests=3, token="Placeholder")
-    for _ in range(5):
-        print(grok.llm("hello there"))
-        print("\n\\n")
+    pass
