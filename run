@@ -9,7 +9,7 @@ fi
 case "$1" in
   install)
     echo "[stub] Installing dependencies..."
-    pip install --user -r requirements.txt
+    pip3 install --user -r requirements.txt
     exit 0
     ;;
   test)
