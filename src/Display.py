@@ -1,3 +1,96 @@
 # src/Display.py
-# THIS CODE WILL HANDLE THE DISPLAY OBJECT.
-# THIS OBJECT WILL HANDLE OUTPUTS AND STUFF LIKE THAT.
+from __future__ import annotations
+
+import json
+from typing import Any, Dict, Iterable, List
+from urllib.parse import urlparse
+
+from src.Metrics import MetricResult
+
+
+def _extract_model_name(model_url: str) -> str:
+    parsed = urlparse(model_url)
+    parts = [p for p in parsed.path.split("/") if p]
+    if not parts:
+        return ""
+    # Typical HF model path: /org/model[/tree/main]
+    # Prefer the second segment when present, else last.
+    if len(parts) >= 2:
+        return parts[1]
+    return parts[-1]
+
+
+def _results_by_key(results: Iterable[MetricResult]) \
+                    -> Dict[str, MetricResult]:
+    return {r.key: r for r in results}
+
+
+def _get_value_latency(res_map: Dict[str, MetricResult], key: str) \
+                       -> tuple[float, int]:
+    res = res_map.get(key)
+    if res is None or res.value is None:
+        return 0.0, 0
+    try:
+        val = float(res.value)
+    except Exception:
+        val = 0.0
+    try:
+        lat = int(res.latency_ms)
+    except Exception:
+        lat = 0
+    return val, lat
+
+
+def build_output_object(group: Dict[str, str], results: List[MetricResult]) \
+                        -> Dict[str, Any]:
+    res_map = _results_by_key(results)
+
+    ramp_val, ramp_lat = _get_value_latency(res_map, "ramp_up_time")
+    lic_val, lic_lat = _get_value_latency(res_map, "license_metric")
+    size_val, size_lat = _get_value_latency(res_map, "size_metric")
+    avail_val, avail_lat = _get_value_latency(res_map, "availability_metric")
+    dquality_val, dquality_lat = _get_value_latency(res_map, "dataset_quality")
+    cquality_val, cquality_lat = _get_value_latency(res_map, "code_quality")
+
+    net_lat = 0
+
+    # Size score as multi-device object to match expected shape
+    size_obj = {
+        "raspberry_pi": size_val,
+        "jetson_nano": size_val,
+        "desktop_pc": size_val,
+        "aws_server": size_val,
+    }
+
+    model_url = group.get("model_url", "")
+    name = _extract_model_name(model_url) if isinstance(model_url, str) else ""
+
+    # Build output dict in the expected key order
+    out: Dict[str, Any] = {}
+    out["name"] = name
+    out["category"] = "MODEL"
+    out["net_score"] = net_lat
+    out["net_score_latency"] = net_lat
+    out["ramp_up_time"] = ramp_val
+    out["ramp_up_time_latency"] = ramp_lat
+    # Optional/unknown metrics in our pipeline: set to 0.0
+    out["bus_factor"] = 0.0
+    out["bus_factor_latency"] = 0
+    out["performance_claims"] = 0.0
+    out["performance_claims_latency"] = 0
+    out["license"] = lic_val
+    out["license_latency"] = lic_lat
+    out["size_score"] = size_obj
+    out["size_score_latency"] = size_lat
+    out["dataset_and_code_score"] = avail_val
+    out["dataset_and_code_score_latency"] = avail_lat
+    out["dataset_quality"] = dquality_val
+    out["dataset_quality_latency"] = dquality_lat
+    out["code_quality"] = cquality_val
+    out["code_quality_latency"] = cquality_lat
+    return out
+
+
+def print_results(group: Dict[str, str], results: List[MetricResult]) -> None:
+    obj = build_output_object(group, results)
+    print(json.dumps(obj, separators=(",", ":")))

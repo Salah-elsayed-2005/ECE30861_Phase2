@@ -3,13 +3,14 @@
 import sys
 
 from src.Dispatcher import Dispatcher
+from src.Display import print_results
 from src.Metrics import (AvailabilityMetric, CodeQuality, DatasetQuality,
                          LicenseMetric, RampUpTime, SizeMetric)
 from src.Parser import Parser
 
 if __name__ == "__main__":
     parse = Parser(sys.argv[1])
-    urls_dict = parse.getGroups()
+    url_groups = parse.getGroups()
 
     dispatcher = Dispatcher([LicenseMetric(),
                              SizeMetric(),
@@ -17,8 +18,6 @@ if __name__ == "__main__":
                              AvailabilityMetric(),
                              DatasetQuality(),
                              CodeQuality()])
-    results = dispatcher.dispatch(parse.getGroups())
-    print(results)
-    print("\n\n")
-    for res in results:
-        print(f"{res.metric}: {res.value}")
+    for group in url_groups:
+        results = dispatcher.dispatch(group)
+        print_results(group, results)
