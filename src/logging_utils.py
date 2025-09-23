@@ -12,7 +12,6 @@ _LOGGER = logging.getLogger(_LOGGER_NAME)
 _CONFIGURED = False
 
 _LEVEL_MAP = {
-    0: logging.DEBUG,  # logger disabled separately when level is 0
     1: logging.INFO,
     2: logging.DEBUG,
 }
@@ -52,6 +51,19 @@ def _configure_root_logger() -> None:
         _LOGGER.disabled = True
         return
 
+    # Always start from a clean handler state.
+    _LOGGER.handlers.clear()
+
+    if level <= 0:
+        # Truncate/touch the log file but keep logging disabled.
+        try:
+            log_path.write_text("", encoding="utf-8")
+        except Exception:
+            # Ignore failures to truncate; best effort.
+            pass
+        _LOGGER.disabled = True
+        return
+
     # Set up file handler that writes UTF-8 logs.
     handler = logging.FileHandler(log_path, encoding="utf-8")
     handler.setLevel(_LEVEL_MAP.get(level, logging.INFO))
@@ -65,11 +77,7 @@ def _configure_root_logger() -> None:
     _LOGGER.setLevel(logging.DEBUG)
     _LOGGER.addHandler(handler)
     _LOGGER.propagate = False
-
-    if level <= 0:
-        _LOGGER.disabled = True
-    else:
-        _LOGGER.disabled = False
+    _LOGGER.disabled = False
 
 
 def get_logger(name: Optional[str] = None) -> logging.Logger:
