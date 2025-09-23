@@ -78,11 +78,10 @@ class Dispatcher:
         inputs: Dict[str, Any],
     ) -> MetricResult:
         logger.debug("Starting metric %s", metric.key)
-        # value, latency_ms, error = self._run_with_timing(
-        #     metric.compute,
-        #     inputs,
-        # )
-        value, latency_ms, error = 0.0, 0, None
+        value, latency_ms, error = self._run_with_timing(
+            metric.compute,
+            inputs,
+        )
         result = MetricResult(
             metric=metric.name,
             key=metric.key,

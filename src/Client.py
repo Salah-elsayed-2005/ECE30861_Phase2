@@ -94,7 +94,7 @@ class PurdueClient(Client):
 
     def __init__(self,
                  max_requests: int,
-                 token: Optional[str] = "None",
+                 token: Optional[str] = None,
                  base_url: str = "https://genai.rcac.purdue.edu/api",
                  window_seconds: float = 60.0) -> None:
         super().__init__()
@@ -245,7 +245,7 @@ class HFClient(Client):
 
     def __init__(self,
                  max_requests: int,
-                 token: Optional[str] = "None",
+                 token: Optional[str] = None,
                  base_url: str = "https://huggingface.co",
                  window_seconds: float = 60.0) -> None:
         super().__init__()
@@ -253,15 +253,7 @@ class HFClient(Client):
         self.window_seconds = window_seconds
         self.base_url = base_url
         # Prefer explicit token; otherwise fall back to env var
-        if token is None:
-            env_token = os.getenv("HF_TOKEN")
-            if not env_token:
-                raise ValueError(
-                    "Missing HF token: set HF_TOKEN or pass token"
-                )
-            self.token = env_token
-        else:
-            self.token = token
+        self.token = token
 
     def can_send(self) -> bool:
         """
@@ -318,7 +310,7 @@ class HFClient(Client):
         >>> client.request("GET", f"/api/models/{repo_id}")['cardData']
         """
         url = f"{self.base_url}{path}"
-        headers = {"Authorization": f"Bearer {self.token}"}
+        headers = {}
         try:
             logger.debug("%s request to %s", method, url)
             resp = requests.request(method=method,
