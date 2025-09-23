@@ -82,7 +82,7 @@ class Dispatcher:
         #     metric.compute,
         #     inputs,
         # )
-        value, latency_ms, error = 0, 0, None
+        value, latency_ms, error = 0.0, 0, None
         result = MetricResult(
             metric=metric.name,
             key=metric.key,
