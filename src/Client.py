@@ -17,6 +17,7 @@ load_dotenv()  # Load keys from .env file
 
 logger = get_logger(__name__)
 
+
 class Client(ABC):
     """
     Abstract client that enforces a rate-limit check before sending

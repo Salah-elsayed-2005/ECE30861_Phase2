@@ -9,7 +9,6 @@ from typing import Dict, List
 
 from src.logging_utils import get_logger
 
-
 logger = get_logger(__name__)
 
 
@@ -51,7 +50,9 @@ class Parser:
         """
         with open(self.filepath, "r", encoding="utf-8") as f:
             lines = [line.strip() for line in f if line.strip()]
-        logger.info("Loaded %d non-empty line(s) from %s", len(lines), self.filepath)
+        logger.info("Loaded %d non-empty line(s) from %s",
+                    len(lines),
+                    self.filepath)
         return lines
 
     def _categorize(self) -> List[Dict[str, str]]:

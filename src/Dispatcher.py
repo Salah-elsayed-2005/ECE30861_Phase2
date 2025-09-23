@@ -9,9 +9,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-from src.Metrics import Metric, MetricResult
 from src.logging_utils import get_logger
-
+from src.Metrics import Metric, MetricResult
 
 logger = get_logger(__name__)
 

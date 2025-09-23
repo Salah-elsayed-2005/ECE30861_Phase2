@@ -4,11 +4,10 @@ import sys
 
 from src.Dispatcher import Dispatcher
 from src.Display import print_results
+from src.logging_utils import get_logger
 from src.Metrics import (AvailabilityMetric, CodeQuality, DatasetQuality,
                          LicenseMetric, RampUpTime, SizeMetric)
 from src.Parser import Parser
-from src.logging_utils import get_logger
-
 
 logger = get_logger(__name__)
 

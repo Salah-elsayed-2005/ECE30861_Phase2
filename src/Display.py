@@ -5,9 +5,8 @@ import json
 from typing import Any, Dict, Iterable, List
 from urllib.parse import urlparse
 
-from src.Metrics import MetricResult
 from src.logging_utils import get_logger
-
+from src.Metrics import MetricResult
 
 logger = get_logger(__name__)
 

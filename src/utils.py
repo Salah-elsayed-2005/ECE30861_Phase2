@@ -11,7 +11,6 @@ from selenium.webdriver.support.ui import WebDriverWait
 from src.Client import HFClient
 from src.logging_utils import get_logger
 
-
 logger = get_logger(__name__)
 
 
@@ -118,7 +117,9 @@ def injectHFBrowser(model: str, headless: bool = True) -> str:
 
         # Get *all* visible text on the page
         page_text = driver.find_element(By.TAG_NAME, "body").text
-        logger.debug("Fetched page text length %d for %s", len(page_text), model)
+        logger.debug("Fetched page text length %d for %s",
+                     len(page_text),
+                     model)
         return page_text
 
     finally:

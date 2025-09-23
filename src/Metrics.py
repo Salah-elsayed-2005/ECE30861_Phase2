@@ -18,7 +18,6 @@ from src.Client import GitClient, HFClient, PurdueClient
 from src.logging_utils import get_logger
 from src.utils import browse_hf_repo, injectHFBrowser
 
-
 logger = get_logger(__name__)
 
 
@@ -480,7 +479,8 @@ class SizeMetric(Metric):
         # For the Jetson Nano parameters we just want the model file to be
         # under 1.5GB (1.2e10 bits).
         if bits <= 0:
-            logger.info("Size score for %s: %.2f (no size info)", model_id, 0.0)
+            logger.info("Size score for %s: %.2f (no size info)",
+                        model_id, 0.0)
             return 0
         score_raw = (1-math.log(bits / SizeMetric.maxModelBits))
         score = score_raw / (1-math.log(1.2e10 / SizeMetric.maxModelBits))
@@ -839,7 +839,9 @@ class DatasetQuality(Metric):
                 f"/api/datasets/{quote(dataset_id, safe='/@.-')}",
             )
         except Exception:
-            logger.info("Failed to fetch dataset %s", dataset_id, exc_info=True)
+            logger.info("Failed to fetch dataset %s",
+                        dataset_id,
+                        exc_info=True)
             return None
         return data if isinstance(data, Mapping) else None
 
@@ -1070,7 +1072,9 @@ class DatasetQuality(Metric):
                     seen.add(mid)
 
         count = len(seen)
-        logger.debug("Dataset %s associated with %d model(s)", dataset_id, count)
+        logger.debug("Dataset %s associated with %d model(s)",
+                     dataset_id,
+                     count)
         return count
 
 
@@ -1193,7 +1197,9 @@ class CodeQuality(Metric):
                 logger.debug("Found GitHub URL %s via model card", gh_url)
                 files = self._load_from_github(gh_url)
                 if files:
-                    logger.debug("Loaded %d file(s) from %s", len(files), gh_url)
+                    logger.debug("Loaded %d file(s) from %s",
+                                 len(files),
+                                 gh_url)
                     return files, "github_from_card", card_text
 
         return {}, "", card_text
@@ -1389,7 +1395,7 @@ class CodeQuality(Metric):
                     issues += 1
 
         if total == 0:
-            logger.debug("No lines evaluated for lint score; defaulting to 0.5")
+            logger.debug("No lines seen for lint score; defaulting to 0.5")
             return 0.5
         compliant_ratio = 1.0 - (issues / total)
         # Anything below 90% compliant is treated as a failure, and
