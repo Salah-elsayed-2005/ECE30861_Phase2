@@ -15,7 +15,11 @@ from typing import Any, Iterable, Mapping, Optional
 from urllib.parse import quote, urlparse
 
 from src.Client import GitClient, HFClient, PurdueClient
+from src.logging_utils import get_logger
 from src.utils import browse_hf_repo, injectHFBrowser
+
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -120,9 +124,12 @@ class RampUpTime(Metric):
         Extract usage text verbatim.
         """
         try:
+            logger.debug("Requesting usage extraction for text length %d",
+                         len(text))
             response = self.grok.llm(prompt)
             return response.strip() if response else None
         except Exception:
+            logger.info("Usage extraction failed via LLM", exc_info=True)
             return None
 
     def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
@@ -145,13 +152,16 @@ class RampUpTime(Metric):
         if not url:
             raise ValueError("Missing required input: model_url")
 
+        logger.info("Computing ramp-up score for %s", url)
         # Fetch the full page text using Selenium
         full_page_text = injectHFBrowser(url)
         usage_text = self._extract_usage_section(full_page_text)
 
         if usage_text:
             char_count = len(usage_text)
+            logger.debug("Usage text length for %s: %d", url, char_count)
         else:
+            logger.info("No usage guidance found for %s", url)
             return 0.0
 
         # Weight long instructions logarithmically so modest increases in
@@ -160,6 +170,7 @@ class RampUpTime(Metric):
         score = 1.0 / (1.0 + math.log1p(char_count / 500))
         score = max(0.0, min(score, 1.0))
 
+        logger.info("Ramp-up score for %s: %.3f", url, score)
         return score
 
 
@@ -305,6 +316,7 @@ class LicenseMetric(Metric):
 
         # extract model_id from URL
         model_id = inputs['model_url'].split("https://huggingface.co/")[-1]
+        logger.info("Computing license score for %s", model_id)
 
         # try to get license from HFClient and assign a score
         model_info = self.hf_client.request("GET",
@@ -312,6 +324,7 @@ class LicenseMetric(Metric):
         card_data = model_info["cardData"]
         license_type = card_data.get("license", None)
         if license_type is None:
+            logger.debug("License not specified for %s", model_id)
             score = 0.0
         elif license_type not in self.license_scores:
             # this grok call will likely never happen because all
@@ -327,9 +340,14 @@ class LicenseMetric(Metric):
                           "the number and that's it. Here is the"
                           f"response: {response}")
             score = float(self.grok_client.llm(new_prompt))
+            logger.debug("Derived license score %.2f for %s via LLM",
+                         score, model_id)
         else:
             score = self.license_scores[license_type]
+            logger.debug("Found license %s with score %.2f for %s",
+                         license_type, score, model_id)
 
+        logger.info("License score for %s: %.2f", model_id, score)
         return score
 
 
@@ -417,6 +435,7 @@ class SizeMetric(Metric):
 
         # Extract the model id and get model info using API
         model_id = inputs['model_url'].split("https://huggingface.co/")[-1]
+        logger.info("Computing size score for %s", model_id)
         card_data = self.hf_client.request("GET", f"/api/models/{model_id}")
 
         bits = None
@@ -425,6 +444,8 @@ class SizeMetric(Metric):
         if have_safetensrs and 'parameters' in card_data['safetensors'].keys():
             params = card_data['safetensors']['parameters']
             bits = self.extract_bits_from_saftensor(params)
+            logger.debug("Using safetensor metadata for %s -> %s bits",
+                         model_id, bits)
         # If not we will need to browse the repo
         else:
             files = browse_hf_repo(self.hf_client,
@@ -441,10 +462,13 @@ class SizeMetric(Metric):
             # No model files means we have no bits
             if len(files_filtered) == 0:
                 bits = -1
+                logger.debug("No model files found for %s", model_id)
             # Average the file sizes
             else:
                 all_bits = [f[1] for f in files_filtered]
                 bits = 8 * int(sum(all_bits) / len(all_bits))
+                logger.debug("Estimated bits for %s from %d file(s): %s",
+                             model_id, len(files_filtered), bits)
 
         # Now that we have the bits, let's assign our score.
         # This will be based on a log scale between the number of bits of
@@ -456,11 +480,13 @@ class SizeMetric(Metric):
         # For the Jetson Nano parameters we just want the model file to be
         # under 1.5GB (1.2e10 bits).
         if bits <= 0:
+            logger.info("Size score for %s: %.2f (no size info)", model_id, 0.0)
             return 0
         score_raw = (1-math.log(bits / SizeMetric.maxModelBits))
         score = score_raw / (1-math.log(1.2e10 / SizeMetric.maxModelBits))
         score = min(score, 1)
         score = max(score, 0)
+        logger.info("Size score for %s: %.2f", model_id, score)
         return score
 
 
@@ -498,6 +524,8 @@ class AvailabilityMetric(Metric):
             (dataset_available, codebase_available,
             dataset_evidence, codebase_evidence).
         """
+        logger.debug("Running availability LLM check with text length %d",
+                     len(page_text or ""))
         if not page_text:
             return (False, False, "", "")
 
@@ -542,8 +570,12 @@ class AvailabilityMetric(Metric):
             codebase = bool(obj.get("codebase_available", False))
             dataset_ev = str(obj.get("dataset_evidence", ""))[:500]
             codebase_ev = str(obj.get("codebase_evidence", ""))[:500]
+            logger.debug("LLM availability result dataset=%s code=%s",
+                         dataset, codebase)
             return (dataset, codebase, dataset_ev, codebase_ev)
         except Exception:
+            logger.info("LLM parsing failed; falling back to heuristics",
+                        exc_info=True)
             lower = page_text.lower()
             dataset_hits = any(
                 kw in lower for kw in [
@@ -579,6 +611,8 @@ class AvailabilityMetric(Metric):
                     if idx != -1:
                         codebase_ev = page_text[max(0, idx-40): idx+120]
                         break
+            logger.debug("Heuristic availability result dataset=%s code=%s",
+                         dataset_hits, codebase_hits)
             return (dataset_hits, codebase_hits, dataset_ev, codebase_ev)
 
     def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
@@ -609,6 +643,8 @@ class AvailabilityMetric(Metric):
         model_url = inputs.get("model_url")
         if not isinstance(model_url, str) or not model_url.strip():
             raise ValueError("Model link not found in input dictionary")
+
+        logger.info("Computing availability score for %s", model_url)
 
         def _nonempty_url(v: Any) -> bool:
             return isinstance(v, str) and v.strip().startswith("http")
@@ -643,7 +679,9 @@ class AvailabilityMetric(Metric):
             "codebase_evidence": code_ev,
         }
         # print(self.last_details)
-        return (0.5 if has_dataset else 0.0) + (0.5 if has_code else 0.0)
+        score = (0.5 if has_dataset else 0.0) + (0.5 if has_code else 0.0)
+        logger.info("Availability score for %s: %.2f", model_url, score)
+        return score
 
 
 class DatasetQuality(Metric):
@@ -683,7 +721,10 @@ class DatasetQuality(Metric):
         dataset_id = self._extract_dataset_id(inputs)
         if not dataset_id:
             self.last_details = {"reason": "dataset_not_found"}
+            logger.info("Dataset quality: no dataset found")
             return 0.0
+
+        logger.info("Computing dataset quality for %s", dataset_id)
 
         # Step 2: pull the dataset metadata from Hugging Face
         payload = self._fetch_dataset(dataset_id)
@@ -692,10 +733,13 @@ class DatasetQuality(Metric):
                 "dataset_id": dataset_id,
                 "reason": "hf_api_error",
             }
+            logger.info("Dataset quality: API error for %s", dataset_id)
             return 0.0
 
         likes = self._safe_int(payload.get("likes"))
         use_count = self.count_models_for_dataset(dataset_id)
+        logger.debug("Dataset %s likes=%d use_count=%d",
+                     dataset_id, likes, use_count)
 
         # Step 3: convert engagement numbers into bounded scores
         likes_score = self._squash_score(likes, scale=250)
@@ -711,6 +755,7 @@ class DatasetQuality(Metric):
             "likes_score": likes_score,
             "use_score": use_score,
         }
+        logger.info("Dataset quality score for %s: %.2f", dataset_id, score)
         return score
 
     def _extract_dataset_id(self, inputs: Mapping[str, Any]) -> Optional[str]:
@@ -788,11 +833,13 @@ class DatasetQuality(Metric):
             Parsed dataset payload, or ``None`` if the request fails.
         """
         try:
+            logger.debug("Fetching dataset metadata for %s", dataset_id)
             data = self.hf_client.request(
                 "GET",
                 f"/api/datasets/{quote(dataset_id, safe='/@.-')}",
             )
         except Exception:
+            logger.info("Failed to fetch dataset %s", dataset_id, exc_info=True)
             return None
         return data if isinstance(data, Mapping) else None
 
@@ -811,11 +858,13 @@ class DatasetQuality(Metric):
             Parsed model payload, or ``None`` when the request fails.
         """
         try:
+            logger.debug("Fetching model metadata for %s", model_id)
             data = self.hf_client.request(
                 "GET",
                 f"/api/models/{quote(model_id, safe='/@.-')}",
             )
         except Exception:
+            logger.info("Failed to fetch model %s", model_id, exc_info=True)
             return None
         return data if isinstance(data, Mapping) else None
 
@@ -1020,7 +1069,9 @@ class DatasetQuality(Metric):
                     # double-counting across filters.
                     seen.add(mid)
 
-        return len(seen)
+        count = len(seen)
+        logger.debug("Dataset %s associated with %d model(s)", dataset_id, count)
+        return count
 
 
 class CodeQuality(Metric):
@@ -1065,7 +1116,10 @@ class CodeQuality(Metric):
             Aggregate quality score bounded to ``[0.0, 1.0]``.
         """
 
+        logger.info("Computing code quality")
         code_files, origin, card_text = self._load_code(inputs)
+        logger.debug("Code load origin=%s file_count=%d",
+                     origin, len(code_files))
         if code_files:
             lint_score = self._lint_score(code_files)
             typing_score = self._typing_score(code_files)
@@ -1080,6 +1134,7 @@ class CodeQuality(Metric):
                 "llm_score": llm_score,
                 "file_count": len(code_files),
             }
+            logger.info("Code quality score from codebase: %.2f", score)
             return score
 
         model_url = inputs.get("model_url")
@@ -1091,6 +1146,7 @@ class CodeQuality(Metric):
             "llm_score": fallback_score,
             "card_available": bool(card_text),
         }
+        logger.info("Code quality fallback score: %.2f", fallback_score)
         return fallback_score
 
     # ------------------------------------------------------------------
@@ -1121,17 +1177,23 @@ class CodeQuality(Metric):
         card_text = ""
         git_url = inputs.get("git_url")
         if isinstance(git_url, str):
+            logger.debug("Attempting to load code from explicit git_url %s",
+                         git_url)
             files = self._load_from_github(git_url)
             if files:
+                logger.debug("Loaded %d file(s) from %s", len(files), git_url)
                 return files, "github", card_text
 
         model_url = inputs.get("model_url")
         if isinstance(model_url, str):
+            logger.debug("Inspecting model card for %s", model_url)
             card_text = self._model_card_text(model_url)
             gh_url = self._github_from_card(card_text)
             if gh_url:
+                logger.debug("Found GitHub URL %s via model card", gh_url)
                 files = self._load_from_github(gh_url)
                 if files:
+                    logger.debug("Loaded %d file(s) from %s", len(files), gh_url)
                     return files, "github_from_card", card_text
 
         return {}, "", card_text
@@ -1158,11 +1220,15 @@ class CodeQuality(Metric):
             Mapping of relative file paths to their source text.
         """
 
+        logger.debug("Loading code from GitHub repo %s", url)
         with tempfile.TemporaryDirectory(prefix="code-metric-") as tmpdir:
             dest = Path(tmpdir) / "repo"
             if not self._clone_repo(url, dest):
+                logger.info("Failed to clone %s", url)
                 return {}
-            return self._read_python_files(dest, limit=limit)
+            files = self._read_python_files(dest, limit=limit)
+            logger.debug("Read %d Python file(s) from %s", len(files), url)
+            return files
 
     def _clone_repo(self, url: str, dest: Path) -> bool:
         """
@@ -1182,6 +1248,7 @@ class CodeQuality(Metric):
         """
 
         try:
+            logger.debug("Cloning repo %s", url)
             subprocess.run(
                 ["git", "clone", "--depth", "1", url, str(dest)],
                 check=True,
@@ -1190,7 +1257,9 @@ class CodeQuality(Metric):
                 timeout=45,
             )
         except (subprocess.SubprocessError, OSError):
+            logger.info("Clone failed for %s", url, exc_info=True)
             return False
+        logger.debug("Clone succeeded for %s", url)
         return True
 
     def _read_python_files(self, root: Path, *, limit: int) -> dict[str, str]:
@@ -1219,6 +1288,7 @@ class CodeQuality(Metric):
                 if path.endswith(".py")
             ]
         except Exception:
+            logger.debug("git ls-files failed in %s", root, exc_info=True)
             candidates = []
 
         if not candidates:
@@ -1226,6 +1296,8 @@ class CodeQuality(Metric):
                 str(path.relative_to(root))
                 for path in sorted(root.rglob("*.py"))
             ]
+        logger.debug("Found %d Python candidate(s) in %s",
+                     len(candidates), root)
 
         results: dict[str, str] = {}
         for rel_path in candidates:
@@ -1238,6 +1310,8 @@ class CodeQuality(Metric):
                 continue
             if text.strip():
                 results[rel_path] = text
+        logger.debug("Returning %d Python file(s) from %s",
+                     len(results), root)
         return results
 
     def _github_from_card(self, card_text: str) -> Optional[str]:
@@ -1256,12 +1330,18 @@ class CodeQuality(Metric):
         """
 
         if not card_text:
+            logger.debug("No card text provided for GitHub extraction")
             return None
         match = re.search(
             r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
             card_text,
         )
-        return match.group(0) if match else None
+        if match:
+            url = match.group(0)
+            logger.debug("Extracted GitHub URL %s from card", url)
+            return url
+        logger.debug("No GitHub URL found in card text")
+        return None
 
     # ------------------------------------------------------------------
     # Static analysis helpers
@@ -1281,6 +1361,7 @@ class CodeQuality(Metric):
             Heuristic lint compliance score within ``[0.0, 1.0]``.
         """
 
+        logger.debug("Computing lint score for %d file(s)", len(code_files))
         total = 0
         issues = 0
 
@@ -1308,11 +1389,15 @@ class CodeQuality(Metric):
                     issues += 1
 
         if total == 0:
+            logger.debug("No lines evaluated for lint score; defaulting to 0.5")
             return 0.5
         compliant_ratio = 1.0 - (issues / total)
         # Anything below 90% compliant is treated as a failure, and
         # 100% compliant receives full credit. Linearly scale in-between.
-        return max(0.0, min(1.0, (compliant_ratio - 0.9) / 0.1))
+        score = max(0.0, min(1.0, (compliant_ratio - 0.9) / 0.1))
+        logger.debug("Lint compliance ratio=%.3f score=%.3f",
+                     compliant_ratio, score)
+        return score
 
     def _typing_score(self, code_files: Mapping[str, str]) -> float:
         """
@@ -1329,6 +1414,7 @@ class CodeQuality(Metric):
             Fraction of typed functions; defaults to ``0.5`` when none found.
         """
 
+        logger.debug("Computing typing score for %d file(s)", len(code_files))
         total_funcs = 0
         typed_funcs = 0
 
@@ -1345,8 +1431,12 @@ class CodeQuality(Metric):
                         typed_funcs += 1
 
         if total_funcs == 0:
+            logger.debug("No functions found; typing score defaults to 0.5")
             return 0.5
-        return typed_funcs / total_funcs
+        score = typed_funcs / total_funcs
+        logger.debug("Typing score %.3f (%d/%d)",
+                     score, typed_funcs, total_funcs)
+        return score
 
     def _function_is_typed(self, node: ast.AST) -> bool:
         """
@@ -1406,6 +1496,7 @@ class CodeQuality(Metric):
 
         snippet = self._code_snippet(code_files)
         if not snippet:
+            logger.debug("No snippet available for LLM code rating")
             return 0.5
 
         prompt = (
@@ -1417,9 +1508,14 @@ class CodeQuality(Metric):
         )
 
         try:
+            logger.debug("Requesting LLM code rating (snippet length %d)",
+                         len(snippet))
             raw = self.grok.llm(prompt)
-            return self._parse_llm_score(raw)
+            score = self._parse_llm_score(raw)
+            logger.debug("LLM code rating %.3f", score)
+            return score
         except Exception:
+            logger.info("LLM code rating failed", exc_info=True)
             return 0.5
 
     def _llm_card_rating(self, card_text: str) -> float:
@@ -1439,6 +1535,7 @@ class CodeQuality(Metric):
         """
 
         if not card_text:
+            logger.debug("No card text; defaulting LLM card rating to 0.3")
             return 0.3
 
         prompt = (
@@ -1450,9 +1547,14 @@ class CodeQuality(Metric):
         )
 
         try:
+            logger.debug("Requesting LLM card rating (text length %d)",
+                         len(card_text))
             raw = self.grok.llm(prompt)
-            return self._parse_llm_score(raw)
+            score = self._parse_llm_score(raw)
+            logger.debug("LLM card rating %.3f", score)
+            return score
         except Exception:
+            logger.info("LLM card rating failed", exc_info=True)
             return 0.3
 
     def _code_snippet(
@@ -1492,7 +1594,9 @@ class CodeQuality(Metric):
             if remaining <= 0:
                 break
 
-        return "\n\n".join(pieces)
+        snippet = "\n\n".join(pieces)
+        logger.debug("Constructed code snippet of length %d", len(snippet))
+        return snippet
 
     def _parse_llm_score(self, raw: Any) -> float:
         """
@@ -1511,13 +1615,17 @@ class CodeQuality(Metric):
         """
 
         if raw is None:
+            logger.debug("LLM score parsing fallback (None)")
             return 0.5
         text = str(raw).strip()
         try:
             value = float(text.split()[0])
         except (ValueError, IndexError):
+            logger.debug("LLM score parsing fallback (invalid response)")
             return 0.5
-        return max(0.0, min(1.0, value))
+        score = max(0.0, min(1.0, value))
+        logger.debug("Parsed LLM score %.3f from response", score)
+        return score
 
     def _model_card_text(self, url: Optional[str]) -> str:
         """
@@ -1536,10 +1644,12 @@ class CodeQuality(Metric):
         """
 
         if not url:
+            logger.debug("No URL provided for model card fetch")
             return ""
         model_id = DatasetQuality._model_id_from_url(url)
         if model_id:
             try:
+                logger.debug("Fetching README for %s", model_id)
                 data = self.hf_client.request(
                     "GET",
                     f"/{model_id}/resolve/main/README.md",
@@ -1547,10 +1657,17 @@ class CodeQuality(Metric):
                 if isinstance(data, bytes):
                     data = data.decode("utf-8", errors="ignore")
                 if isinstance(data, str) and data.strip():
+                    logger.debug("Retrieved README (%d chars) for %s",
+                                 len(data), model_id)
                     return data
             except Exception:
-                pass
+                logger.info("Failed to fetch README for %s", model_id,
+                            exc_info=True)
         try:
-            return injectHFBrowser(url)
+            logger.debug("Falling back to browser fetch for %s", url)
+            text = injectHFBrowser(url)
+            logger.debug("Browser fetch returned %d chars", len(text))
+            return text
         except Exception:
+            logger.info("Browser fetch failed for %s", url, exc_info=True)
             return ""

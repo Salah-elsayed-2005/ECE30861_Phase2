@@ -10,6 +10,10 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from src.Metrics import Metric, MetricResult
+from src.logging_utils import get_logger
+
+
+logger = get_logger(__name__)
 
 
 class Dispatcher:
@@ -46,9 +50,16 @@ class Dispatcher:
         """Execute all registered metrics concurrently with shared inputs."""
 
         if not self._metrics:
+            logger.info("No metrics registered; returning empty results")
             return []
 
         worker_count = self._resolve_worker_count()
+        logger.info(
+            "Dispatching %d metric(s) using %d worker(s)",
+            len(self._metrics),
+            worker_count,
+        )
+        logger.debug("Dispatch inputs: %s", inputs)
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = [
                 executor.submit(self._execute_metric, metric, inputs)
@@ -67,18 +78,21 @@ class Dispatcher:
         metric: Metric,
         inputs: Dict[str, Any],
     ) -> MetricResult:
+        logger.debug("Starting metric %s", metric.key)
         # value, latency_ms, error = self._run_with_timing(
         #     metric.compute,
         #     inputs,
         # )
         value, latency_ms, error = 0, 0, None
-        return MetricResult(
+        result = MetricResult(
             metric=metric.name,
             key=metric.key,
             value=value,
             latency_ms=latency_ms,
             error=error,
         )
+        logger.debug("Finished metric %s with result %s", metric.key, result)
+        return result
 
     def _run_with_timing(
         self,
@@ -93,6 +107,7 @@ class Dispatcher:
             result = func(*args, **kwargs)
             error: Optional[str] = None
         except Exception as exc:
+            logger.debug("Metric execution raised %s", exc, exc_info=True)
             result = float("nan")
             error = f"{exc.__class__.__name__}: {exc}"
         latency_ms = int((time.perf_counter() - start) * 1000.0)

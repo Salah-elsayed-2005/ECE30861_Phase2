@@ -10,8 +10,12 @@ from typing import Any, Deque, List, Optional
 import requests
 from dotenv import load_dotenv
 
+from src.logging_utils import get_logger
+
 load_dotenv()  # Load keys from .env file
 
+
+logger = get_logger(__name__)
 
 class Client(ABC):
     """
@@ -63,7 +67,9 @@ class Client(ABC):
         """
         if not self.can_send():
             msg = "Rate limit exceeded: request not allowed right now."
+            logger.info("Rate limit hit for %s", self.__class__.__name__)
             raise RuntimeError(msg)
+        logger.debug("Rate limit ok for %s", self.__class__.__name__)
         return self._send(*args, **kwargs)
 
 
@@ -162,22 +168,27 @@ class PurdueClient(Client):
         headers = {"Authorization": f"Bearer {self.token}",
                    "Content-Type": "application/json"}
         try:
+            logger.debug("%s request to %s", method, url)
             resp = requests.request(method=method,
                                     url=url,
                                     headers=headers,
                                     timeout=15,
                                     **kwargs)
         except requests.RequestException as e:
+            logger.info("Purdue API request failed: %s", e)
             raise RuntimeError(f"Purdue API request failed: {e}") from e
 
         if not resp.ok:
             msg = f"Purdue API error {resp.status_code}: {resp.text}"
+            logger.info("Purdue API error %s for %s", resp.status_code, url)
             raise RuntimeError(msg)
 
         # Try to parse JSON, else return text
         try:
+            logger.debug("Purdue API returned JSON for %s", url)
             return resp.json()
         except ValueError:
+            logger.debug("Purdue API returned text for %s", url)
             return resp.text
 
     def llm(self, message: str) -> str:
@@ -209,6 +220,7 @@ class PurdueClient(Client):
         try:
             return completion["choices"][0]["message"]["content"]
         except Exception as e:  # pragma: no cover - defensive parsing
+            logger.info("Unexpected Purdue API response format: %s", e)
             raise RuntimeError("Unexpected Purdue API response format") from e
 
 
@@ -307,22 +319,27 @@ class HFClient(Client):
         url = f"{self.base_url}{path}"
         headers = {"Authorization": f"Bearer {self.token}"}
         try:
+            logger.debug("%s request to %s", method, url)
             resp = requests.request(method=method,
                                     url=url,
                                     headers=headers,
                                     timeout=15,
                                     **kwargs)
         except requests.RequestException as e:
+            logger.info("HF API request failed: %s", e)
             raise RuntimeError(f"HF API request failed: {e}") from e
 
         if not resp.ok:
             msg = f"HF API error {resp.status_code}: {resp.text}"
+            logger.info("HF API error %s for %s", resp.status_code, url)
             raise RuntimeError(msg)
 
         # Try to parse JSON, else return text
         try:
+            logger.debug("HF API returned JSON for %s", url)
             return resp.json()
         except ValueError:
+            logger.debug("HF API returned text for %s", url)
             return resp.text
 
 
@@ -404,6 +421,7 @@ class GitClient(Client):
         >>> client.request("status", "--porcelain")
         """
         cmd = ["git", *git_args]
+        logger.debug("Running git command: %s", " ".join(cmd))
         try:
             proc = subprocess.run(
                 cmd,
@@ -414,12 +432,16 @@ class GitClient(Client):
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as e:
+            logger.info("Git command failed: %s", e)
             raise RuntimeError(f"Git command failed to run: {e}") from e
 
         if proc.returncode != 0:
             err = proc.stderr.strip() or "unknown git error"
+            logger.info("Git command error %s: %s", proc.returncode, err)
             raise RuntimeError(f"Git command error {proc.returncode}: {err}")
 
+        logger.debug("Git command succeeded with %d bytes of output",
+                     len(proc.stdout or ""))
         return (proc.stdout or "").rstrip("\n")
 
     def list_files(self) -> List[str]:

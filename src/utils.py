@@ -9,6 +9,10 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from src.Client import HFClient
+from src.logging_utils import get_logger
+
+
+logger = get_logger(__name__)
 
 
 def browse_hf_repo(
@@ -45,6 +49,7 @@ def browse_hf_repo(
     path = f"/api/{plural}/{repo_id}/tree/{revision}"
     params = {"recursive": 1} if recursive else {}
 
+    logger.info("Browsing HF repo %s (%s) at %s", repo_id, repo_type, revision)
     data = client.request("GET", path, params=params)
 
     # Handle response format
@@ -55,11 +60,13 @@ def browse_hf_repo(
     else:
         return []
 
-    return [
+    files = [
         (e["path"], e.get("size", -1))
         for e in entries
         if e.get("type") != "directory"
     ]
+    logger.debug("Retrieved %d file(s) from %s", len(files), repo_id)
+    return files
 
 
 def injectHFBrowser(model: str, headless: bool = True) -> str:
@@ -96,6 +103,7 @@ def injectHFBrowser(model: str, headless: bool = True) -> str:
     chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--disable-infobars")
 
+    logger.info("Fetching Hugging Face page %s", model)
     driver = webdriver.Chrome(options=chrome_options)
     try:
         driver.get(model)
@@ -109,7 +117,10 @@ def injectHFBrowser(model: str, headless: bool = True) -> str:
         )
 
         # Get *all* visible text on the page
-        return driver.find_element(By.TAG_NAME, "body").text
+        page_text = driver.find_element(By.TAG_NAME, "body").text
+        logger.debug("Fetched page text length %d for %s", len(page_text), model)
+        return page_text
 
     finally:
         driver.quit()
+        logger.debug("Closed browser session for %s", model)

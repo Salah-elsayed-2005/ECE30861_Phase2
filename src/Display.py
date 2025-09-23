@@ -6,6 +6,10 @@ from typing import Any, Dict, Iterable, List
 from urllib.parse import urlparse
 
 from src.Metrics import MetricResult
+from src.logging_utils import get_logger
+
+
+logger = get_logger(__name__)
 
 
 def _extract_model_name(model_url: str) -> str:
@@ -43,6 +47,7 @@ def _get_value_latency(res_map: Dict[str, MetricResult], key: str) \
 
 def build_output_object(group: Dict[str, str], results: List[MetricResult]) \
                         -> Dict[str, Any]:
+    logger.debug("Building output object for group %s", group)
     res_map = _results_by_key(results)
 
     ramp_val, ramp_lat = _get_value_latency(res_map, "ramp_up_time")
@@ -88,9 +93,11 @@ def build_output_object(group: Dict[str, str], results: List[MetricResult]) \
     out["dataset_quality_latency"] = dquality_lat
     out["code_quality"] = cquality_val
     out["code_quality_latency"] = cquality_lat
+    logger.debug("Output object ready: %s", out)
     return out
 
 
 def print_results(group: Dict[str, str], results: List[MetricResult]) -> None:
     obj = build_output_object(group, results)
+    logger.info("Printing results for %s", group.get("model_url", "unknown"))
     print(json.dumps(obj, separators=(",", ":")))

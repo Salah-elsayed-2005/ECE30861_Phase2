@@ -7,6 +7,11 @@
 
 from typing import Dict, List
 
+from src.logging_utils import get_logger
+
+
+logger = get_logger(__name__)
+
 
 class Parser:
     """
@@ -45,7 +50,9 @@ class Parser:
             List of non-empty, stripped lines from the file.
         """
         with open(self.filepath, "r", encoding="utf-8") as f:
-            return [line.strip() for line in f if line.strip()]
+            lines = [line.strip() for line in f if line.strip()]
+        logger.info("Loaded %d non-empty line(s) from %s", len(lines), self.filepath)
+        return lines
 
     def _categorize(self) -> List[Dict[str, str]]:
         """
@@ -72,11 +79,13 @@ class Parser:
                 continue
 
             git_url, dataset_url, model_url = cleaned
-            results.append({
+            group = {
                 "git_url": git_url,
                 "dataset_url": dataset_url,
                 "model_url": model_url,
-            })
+            }
+            results.append(group)
+            logger.debug("Parsed group %s", group)
 
         return results
 
