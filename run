@@ -19,7 +19,7 @@ case "$1" in
     exit 0
     ;;
   *) # absolute path assumed = URL_FILE
-    echo "Running CLIApp(file)..."
+    # echo "Running CLIApp(file)..."
     python -m src.CLIApp $1
     exit 0
     ;;
