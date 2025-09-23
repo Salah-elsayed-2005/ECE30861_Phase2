@@ -87,7 +87,7 @@ class PurdueClient(Client):
 
     def __init__(self,
                  max_requests: int,
-                 token: Optional[str] = None,
+                 token: Optional[str] = "None",
                  base_url: str = "https://genai.rcac.purdue.edu/api",
                  window_seconds: float = 60.0) -> None:
         super().__init__()
@@ -232,7 +232,7 @@ class HFClient(Client):
 
     def __init__(self,
                  max_requests: int,
-                 token: Optional[str] = None,
+                 token: Optional[str] = "None",
                  base_url: str = "https://huggingface.co",
                  window_seconds: float = 60.0) -> None:
         super().__init__()
