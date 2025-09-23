@@ -120,11 +120,9 @@ class RampUpTime(Metric):
         Extract usage text verbatim.
         """
         try:
-            # Assuming your GrokClient has an llm() method
             response = self.grok.llm(prompt)
             return response.strip() if response else None
-        except Exception as e:
-            print(f"Grok LLM extraction failed: {e}")
+        except Exception:
             return None
 
     def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
@@ -154,8 +152,7 @@ class RampUpTime(Metric):
         if usage_text:
             char_count = len(usage_text)
         else:
-            print("Could not find any usage examples")
-            char_count = 0
+            return 0.0
 
         # Weight long instructions logarithmically so modest increases in
         # length do not crater the score, while extremely long sections still
@@ -516,7 +513,8 @@ class AvailabilityMetric(Metric):
            If URL, just the URL is sufficient for evidence.
         2) A codebase: a concrete link to source code repository
         (e.g., GitHub/GitLab/Bitbucket) or an
-           installable package with a repository reference. If URL, just the
+           installable package with a repository reference. If just a reference
+           to a repository, but no link, not sufficient. If URL, just the
            URL is sufficient for evidence.
 
         Respond STRICTLY in compact JSON with four fields:
@@ -607,32 +605,45 @@ class AvailabilityMetric(Metric):
         ValueError
             If 'model_url' is missing from inputs.
         """
-        if "model_url" not in inputs.keys():
+
+        model_url = inputs.get("model_url")
+        if not isinstance(model_url, str) or not model_url.strip():
             raise ValueError("Model link not found in input dictionary")
 
-        url = inputs["model_url"]
-        # Retrieve full, rendered text from the model page
-        page_text = injectHFBrowser(url)
+        def _nonempty_url(v: Any) -> bool:
+            return isinstance(v, str) and v.strip().startswith("http")
 
-        (dataset_available, codebase_available,
-         dataset_ev, codebase_ev) = self._llm_detect_availability(page_text)
+        explicit_dataset = inputs.get("dataset_url")
+        explicit_git = inputs.get("git_url")
 
-        score = 0.0
-        if dataset_available:
-            score += 0.5
-        if codebase_available:
-            score += 0.5
+        has_dataset = _nonempty_url(explicit_dataset)
+        has_code = _nonempty_url(explicit_git)
 
-        # Expose details for testing/inspection
+        dataset_ev = explicit_dataset if has_dataset else ""
+        code_ev = explicit_git if has_code else ""
+
+        if not (has_dataset and has_code):
+            try:
+                page_text = injectHFBrowser(model_url)
+            except Exception:
+                page_text = ""
+            d_avail, c_avail, d_ev, c_ev = \
+                self._llm_detect_availability(page_text)
+            if d_avail and not has_dataset:
+                has_dataset = True
+                dataset_ev = d_ev
+            if c_avail and not has_code:
+                has_code = True
+                code_ev = c_ev
+
         self.last_details = {
-            "dataset_available": dataset_available,
-            "codebase_available": codebase_available,
+            "dataset_available": has_dataset,
+            "codebase_available": has_code,
             "dataset_evidence": dataset_ev,
-            "codebase_evidence": codebase_ev,
+            "codebase_evidence": code_ev,
         }
         # print(self.last_details)
-
-        return score
+        return (0.5 if has_dataset else 0.0) + (0.5 if has_code else 0.0)
 
 
 class DatasetQuality(Metric):

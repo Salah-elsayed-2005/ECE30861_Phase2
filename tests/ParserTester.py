@@ -34,45 +34,51 @@ class TestParser(unittest.TestCase):
     """
 
     def test_model_url(self):
-        """Test that a Hugging Face model URL is
-        categorized into 'model_url'"""
-        path = makeTestFile(["https://huggingface.co/bert-base-uncased"])
+        """A model URL in the 3rd column populates 'model_url'."""
+        url = "https://huggingface.co/bert-base-uncased"
+        path = makeTestFile([f",,{url}"])
         parser = Parser(path)
         groups = parser.getGroups()
-        self.assertIn("https://huggingface.co/bert-base-uncased",
-                      groups["model_url"])
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["model_url"], url)
+        self.assertEqual(groups[0]["git_url"], "")
+        self.assertEqual(groups[0]["dataset_url"], "")
 
     def test_dataset_url(self):
-        """Test that a Hugging Face dataset URL is
-        categorized into 'dataset_url'"""
-        path = makeTestFile(["https://huggingface.co/datasets/imdb"])
+        """A dataset URL in the 2nd column populates 'dataset_url'."""
+        url = "https://huggingface.co/datasets/imdb"
+        path = makeTestFile([f",{url},"])
         parser = Parser(path)
         groups = parser.getGroups()
-        self.assertIn("https://huggingface.co/datasets/imdb",
-                      groups["dataset_url"])
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["dataset_url"], url)
+        self.assertEqual(groups[0]["git_url"], "")
+        self.assertEqual(groups[0]["model_url"], "")
 
     def test_git_url(self):
-        """Test that a GitHub repo URL is categorized into 'git_url'"""
-        path = makeTestFile(["https://github.com/user/repo"])
+        """A GitHub URL in the 1st column populates 'git_url'."""
+        url = "https://github.com/user/repo"
+        path = makeTestFile([f"{url},,"])
         parser = Parser(path)
         groups = parser.getGroups()
-        self.assertIn("https://github.com/user/repo", groups["git_url"])
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["git_url"], url)
+        self.assertEqual(groups[0]["dataset_url"], "")
+        self.assertEqual(groups[0]["model_url"], "")
 
     def test_multiple_urls(self):
-        """Test that multiple URLs are categorized into correct groups"""
+        """All three URLs on one line map to their columns."""
+        git = "https://github.com/SkyworkAI/Matrix-Game"
+        dataset = "https://huggingface.co/datasets/xlangai/AgentNet"
         model = "https://huggingface.co/google/gemma-3-270m/tree/main"
-        path = makeTestFile([
-            model,
-            "https://huggingface.co/datasets/xlangai/AgentNet",
-            "https://github.com/SkyworkAI/Matrix-Game",
-        ])
+        line = f"{git},{dataset},{model}"
+        path = makeTestFile([line])
         parser = Parser(path)
         groups = parser.getGroups()
-        self.assertEqual(groups["model_url"], model)
-        self.assertEqual(groups["dataset_url"],
-                         "https://huggingface.co/datasets/xlangai/AgentNet")
-        self.assertEqual(groups["git_url"],
-                         "https://github.com/SkyworkAI/Matrix-Game")
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["git_url"], git)
+        self.assertEqual(groups[0]["dataset_url"], dataset)
+        self.assertEqual(groups[0]["model_url"], model)
 
 
 if __name__ == '__main__':

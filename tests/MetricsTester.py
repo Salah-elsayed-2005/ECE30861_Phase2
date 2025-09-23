@@ -209,7 +209,6 @@ class TestRampUpTimeMetric(unittest.TestCase):
         expected = max(0.0, min(expected, 1.0))
         self.assertAlmostEqual(score, expected)
 
-    @patch("builtins.print")
     @patch("src.Metrics.injectHFBrowser")
     @patch.object(RampUpTime, "_extract_usage_section")
     @patch("src.Metrics.GrokClient")
@@ -220,7 +219,6 @@ class TestRampUpTimeMetric(unittest.TestCase):
         _mock_grok_client_cls: MagicMock,
         mock_extract: MagicMock,
         mock_inject: MagicMock,
-        mock_print: MagicMock,
     ) -> None:
         metric = RampUpTime()
         mock_inject.return_value = "full page text"
@@ -228,11 +226,9 @@ class TestRampUpTimeMetric(unittest.TestCase):
 
         input = {"model_url": "https://huggingface.co/acme/model"}
         score = metric.compute(input)
-
         mock_inject.assert_called_once()
         mock_extract.assert_called_once_with("full page text")
-        mock_print.assert_called()
-        self.assertEqual(score, 1.0)
+        self.assertEqual(score, 0.0)
 
 
 class TestLicenseMetric(unittest.TestCase):
