@@ -14,7 +14,7 @@ from textwrap import shorten
 from typing import Any, Iterable, Mapping, Optional
 from urllib.parse import quote, urlparse
 
-from src.Client import GitClient, GrokClient, HFClient
+from src.Client import GitClient, PurdueClient, HFClient
 from src.utils import browse_hf_repo, injectHFBrowser
 
 
@@ -89,7 +89,7 @@ class RampUpTime(Metric):
 
     def __init__(self):
         self.client = HFClient(max_requests=3)
-        self.grok = GrokClient(max_requests=100)
+        self.grok = PurdueClient(max_requests=100)
 
     def _extract_usage_section(self, text: str) -> str | None:
         """
@@ -274,7 +274,7 @@ class LicenseMetric(Metric):
 
     def __init__(self):
         self.hf_client = HFClient(max_requests=100)
-        self.grok_client = GrokClient(max_requests=100)
+        self.grok_client = PurdueClient(max_requests=100)
 
     def compute(self, inputs: dict[str, Any], **kwargs) -> float:
         """
@@ -478,7 +478,7 @@ class AvailabilityMetric(Metric):
     key = "availability_metric"
 
     def __init__(self) -> None:
-        self.grok = GrokClient(max_requests=100)
+        self.grok = PurdueClient(max_requests=100)
         self.last_details: dict[str, Any] = {}
 
     def _llm_detect_availability(self, page_text: str) \
@@ -1040,10 +1040,10 @@ class CodeQuality(Metric):
     def __init__(
         self,
         hf_client: Optional[HFClient] = None,
-        grok_client: Optional[GrokClient] = None,
+        grok_client: Optional[PurdueClient] = None,
     ) -> None:
         self.hf_client = hf_client or HFClient(max_requests=10)
-        self.grok = grok_client or GrokClient(max_requests=100)
+        self.grok = grok_client or PurdueClient(max_requests=100)
         self.last_details: dict[str, Any] = {}
 
     def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:

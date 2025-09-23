@@ -67,9 +67,9 @@ class Client(ABC):
         return self._send(*args, **kwargs)
 
 
-class GrokClient(Client):
+class PurdueClient(Client):
     """
-    Client for the Groq API that implements a per-class (process-local)
+    Client for the Purdue GenAI API that implements a per-class (process-local)
     rate limit shared across all instances.
 
     Notes
@@ -88,17 +88,17 @@ class GrokClient(Client):
     def __init__(self,
                  max_requests: int,
                  token: Optional[str] = None,
-                 base_url: str = "https://api.groq.com/openai/v1",
+                 base_url: str = "https://genai.rcac.purdue.edu/api",
                  window_seconds: float = 60.0) -> None:
         super().__init__()
         self.max_requests = max_requests
         self.window_seconds = window_seconds
         # Prefer explicit token; otherwise fall back to env var
         if token is None:
-            env_token = os.getenv("GROQ_API_KEY")
+            env_token = os.getenv("GEN_AI_STUDIO_API_KEY")
             if not env_token:
                 raise ValueError(
-                    "Missing Groq token: set GROQ_API_KEY or pass token"
+                    "Missing token: set GEN_AI_STUDIO_API_KEY or pass token"
                 )
             self.token = env_token
         else:
@@ -119,21 +119,21 @@ class GrokClient(Client):
         cutoff = now - self.window_seconds
 
         # Use the lock to avoid accessing same memory during multiprocessing
-        with GrokClient._lock:
+        with PurdueClient._lock:
             # Remove any requests from before the window
-            hist = GrokClient.request_history
+            hist = PurdueClient.request_history
             while hist and hist[0] <= cutoff:
                 hist.popleft()
 
             # If we can still make the request, we keep going
-            if len(GrokClient.request_history) < self.max_requests:
-                GrokClient.request_history.append(now)
+            if len(PurdueClient.request_history) < self.max_requests:
+                PurdueClient.request_history.append(now)
                 return True
         return False
 
     def _send(self, method: str, path: str, **kwargs: Any) -> Any:
         """
-        Perform an HTTP request to Grok’s API.
+        Perform an HTTP request to Purdue's API.
 
         Parameters
         ----------
@@ -159,7 +159,8 @@ class GrokClient(Client):
         >>> client.request("GET", "/models", params={"limit": 5})
         """
         url = f"{self.base_url}{path}"
-        headers = {"Authorization": f"Bearer {self.token}"}
+        headers = {"Authorization": f"Bearer {self.token}",
+                   "Content-Type": "application/json"}
         try:
             resp = requests.request(method=method,
                                     url=url,
@@ -167,10 +168,10 @@ class GrokClient(Client):
                                     timeout=15,
                                     **kwargs)
         except requests.RequestException as e:
-            raise RuntimeError(f"Grok API request failed: {e}") from e
+            raise RuntimeError(f"Purdue API request failed: {e}") from e
 
         if not resp.ok:
-            msg = f"Grok API error {resp.status_code}: {resp.text}"
+            msg = f"Purdue API error {resp.status_code}: {resp.text}"
             raise RuntimeError(msg)
 
         # Try to parse JSON, else return text
@@ -181,7 +182,7 @@ class GrokClient(Client):
 
     def llm(self, message: str) -> str:
         """
-        Run the ``llama-3.1-8b-instant`` model on the given input and
+        Run the ``llama-3.1-8b`` model on the given input and
         return the assistant's response text.
 
         Parameters
@@ -198,8 +199,9 @@ class GrokClient(Client):
             "POST",
             "/chat/completions",
             json={
-                "model": "llama-3.1-8b-instant",
+                "model": "llama3.1:latest",
                 "messages": [{"role": "user", "content": message}],
+                "stream": False,
             },
         )
 
@@ -207,8 +209,7 @@ class GrokClient(Client):
         try:
             return completion["choices"][0]["message"]["content"]
         except Exception as e:  # pragma: no cover - defensive parsing
-            raise RuntimeError("Unexpected Groq API response format") from e
-
+            raise RuntimeError("Unexpected Purdue API response format") from e
 
 class HFClient(Client):
     """

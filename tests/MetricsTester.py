@@ -172,7 +172,7 @@ class TestSizeMetric(unittest.TestCase):
 class TestRampUpTimeMetric(unittest.TestCase):
     """Test the RampUpTime metric without calling external services."""
 
-    @patch("src.Metrics.GrokClient")
+    @patch("src.Metrics.PurdueClient")
     @patch("src.Metrics.HFClient")
     def test_requires_model_url(
         self,
@@ -185,7 +185,7 @@ class TestRampUpTimeMetric(unittest.TestCase):
 
     @patch("src.Metrics.injectHFBrowser")
     @patch.object(RampUpTime, "_extract_usage_section")
-    @patch("src.Metrics.GrokClient")
+    @patch("src.Metrics.PurdueClient")
     @patch("src.Metrics.HFClient")
     def test_compute_uses_usage_excerpt(
         self,
@@ -211,7 +211,7 @@ class TestRampUpTimeMetric(unittest.TestCase):
 
     @patch("src.Metrics.injectHFBrowser")
     @patch.object(RampUpTime, "_extract_usage_section")
-    @patch("src.Metrics.GrokClient")
+    @patch("src.Metrics.PurdueClient")
     @patch("src.Metrics.HFClient")
     def test_compute_handles_missing_usage_excerpt(
         self,
@@ -234,7 +234,7 @@ class TestRampUpTimeMetric(unittest.TestCase):
 class TestLicenseMetric(unittest.TestCase):
     """Test the LicenseMetric behavior under different license sources."""
 
-    @patch("src.Metrics.GrokClient")
+    @patch("src.Metrics.PurdueClient")
     @patch("src.Metrics.HFClient")
     def test_requires_model_url(
         self,
@@ -245,7 +245,7 @@ class TestLicenseMetric(unittest.TestCase):
         with self.assertRaises(ValueError):
             metric.compute({})
 
-    @patch("src.Metrics.GrokClient")
+    @patch("src.Metrics.PurdueClient")
     @patch("src.Metrics.HFClient")
     def test_known_license_uses_lookup(
         self,
@@ -268,7 +268,7 @@ class TestLicenseMetric(unittest.TestCase):
         )
         mock_grok_client_cls.return_value.llm.assert_not_called()
 
-    @patch("src.Metrics.GrokClient")
+    @patch("src.Metrics.PurdueClient")
     @patch("src.Metrics.HFClient")
     def test_missing_license_defaults_to_zero(
         self,
@@ -285,7 +285,7 @@ class TestLicenseMetric(unittest.TestCase):
         self.assertEqual(score, 0.0)
         mock_grok_client_cls.return_value.llm.assert_not_called()
 
-    @patch("src.Metrics.GrokClient")
+    @patch("src.Metrics.PurdueClient")
     @patch("src.Metrics.HFClient")
     def test_unknown_license_asks_grok(
         self,
@@ -823,7 +823,7 @@ class TestAvailabilityMetric(unittest.TestCase):
     """
 
     @patch("src.Metrics.injectHFBrowser")
-    @patch("src.Metrics.GrokClient")
+    @patch("src.Metrics.PurdueClient")
     def test_requires_model_url(
         self,
         _mock_grok_cls: MagicMock,
@@ -835,7 +835,7 @@ class TestAvailabilityMetric(unittest.TestCase):
 
     @patch.object(AvailabilityMetric, "_llm_detect_availability")
     @patch("src.Metrics.injectHFBrowser")
-    @patch("src.Metrics.GrokClient")
+    @patch("src.Metrics.PurdueClient")
     def test_compute_scores_partial_availability(
         self,
         _mock_grok_cls: MagicMock,
@@ -864,7 +864,7 @@ class TestAvailabilityMetric(unittest.TestCase):
 
     @patch.object(AvailabilityMetric, "_llm_detect_availability")
     @patch("src.Metrics.injectHFBrowser")
-    @patch("src.Metrics.GrokClient")
+    @patch("src.Metrics.PurdueClient")
     def test_compute_scores_full_availability(
         self,
         _mock_grok_cls: MagicMock,
@@ -891,7 +891,7 @@ class TestAvailabilityMetric(unittest.TestCase):
             },
         )
 
-    @patch("src.Metrics.GrokClient")
+    @patch("src.Metrics.PurdueClient")
     def test_llm_detect_availability_parses_llm_json(
         self,
         mock_grok_cls: MagicMock,
@@ -919,7 +919,7 @@ class TestAvailabilityMetric(unittest.TestCase):
         self.assertEqual(codebase_ev, "")
         grok_mock.llm.assert_called_once()
 
-    @patch("src.Metrics.GrokClient")
+    @patch("src.Metrics.PurdueClient")
     def test_llm_detect_availability_handles_empty_text(
         self,
         _mock_grok_cls: MagicMock,
@@ -935,7 +935,7 @@ class TestAvailabilityMetric(unittest.TestCase):
         self.assertEqual(dataset_ev, "")
         self.assertEqual(codebase_ev, "")
 
-    @patch("src.Metrics.GrokClient")
+    @patch("src.Metrics.PurdueClient")
     def test_llm_detection_fallback_uses_heuristics(
         self,
         mock_grok_cls: MagicMock,

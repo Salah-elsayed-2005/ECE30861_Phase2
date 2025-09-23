@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
-from src.Client import Client, GitClient, GrokClient, HFClient
+from src.Client import Client, GitClient, PurdueClient, HFClient
 
 '''
 CLIENT TESTS
@@ -45,16 +45,16 @@ GROK TESTS
 '''
 
 
-class TestGrokClientRateLimit(unittest.TestCase):
+class TestPurdueClientRateLimit(unittest.TestCase):
     def setUp(self) -> None:
         # Ensure clean slate for the shared history
-        GrokClient.request_history.clear()
+        PurdueClient.request_history.clear()
 
     def tearDown(self) -> None:
-        GrokClient.request_history.clear()
+        PurdueClient.request_history.clear()
 
     def test_global_rate_limit_window(self) -> None:
-        client = GrokClient(max_requests=2, token="t", window_seconds=10.0)
+        client = PurdueClient(max_requests=2, token="t", window_seconds=10.0)
 
         with patch("time.monotonic", side_effect=[100.0, 100.0, 100.0, 111.0]):
             # First two allowed
@@ -66,19 +66,19 @@ class TestGrokClientRateLimit(unittest.TestCase):
             self.assertTrue(client.can_send())
 
 
-class TestGrokClientSendAndLLM(unittest.TestCase):
+class TestPurdueClientSendAndLLM(unittest.TestCase):
     def setUp(self) -> None:
-        GrokClient.request_history.clear()
+        PurdueClient.request_history.clear()
 
     def tearDown(self) -> None:
-        GrokClient.request_history.clear()
+        PurdueClient.request_history.clear()
 
-    @patch.object(GrokClient, "can_send", return_value=True)
+    @patch.object(PurdueClient, "can_send", return_value=True)
     @patch("requests.request")
     def test__send_json_success(self,
                                 mock_req: MagicMock,
                                 _mock_can: MagicMock) -> None:
-        client = GrokClient(max_requests=3, token="abc")
+        client = PurdueClient(max_requests=3, token="abc")
 
         resp = MagicMock()
         resp.ok = True
@@ -88,12 +88,12 @@ class TestGrokClientSendAndLLM(unittest.TestCase):
         out = client._send("GET", "/status")
         self.assertEqual(out, {"hello": "world"})
 
-    @patch.object(GrokClient, "can_send", return_value=True)
+    @patch.object(PurdueClient, "can_send", return_value=True)
     @patch("requests.request")
     def test__send_text_fallback(self,
                                  mock_req: MagicMock,
                                  _mock_can: MagicMock) -> None:
-        client = GrokClient(max_requests=3, token="abc")
+        client = PurdueClient(max_requests=3, token="abc")
 
         resp = MagicMock()
         resp.ok = True
@@ -104,12 +104,12 @@ class TestGrokClientSendAndLLM(unittest.TestCase):
         out = client._send("GET", "/status")
         self.assertEqual(out, "plain text")
 
-    @patch.object(GrokClient, "can_send", return_value=True)
+    @patch.object(PurdueClient, "can_send", return_value=True)
     @patch("requests.request")
     def test__send_error_status(self,
                                 mock_req: MagicMock,
                                 _mock_can: MagicMock) -> None:
-        client = GrokClient(max_requests=3, token="abc")
+        client = PurdueClient(max_requests=3, token="abc")
 
         resp = MagicMock()
         resp.ok = False
@@ -121,12 +121,12 @@ class TestGrokClientSendAndLLM(unittest.TestCase):
             client._send("POST", "/do")
         self.assertIn("400", str(ctx.exception))
 
-    @patch.object(GrokClient, "can_send", return_value=True)
+    @patch.object(PurdueClient, "can_send", return_value=True)
     @patch("requests.request")
     def test_llm_uses_message_and_parses_text(self,
                                               mock_req: MagicMock,
                                               _mock_can: MagicMock) -> None:
-        client = GrokClient(max_requests=3, token="abc")
+        client = PurdueClient(max_requests=3, token="abc")
 
         completion = {
             "choices": [
@@ -336,14 +336,15 @@ ENV VAR TOKEN TESTS
 '''
 
 
-class TestGrokClientEnvToken(unittest.TestCase):
-    @patch.object(GrokClient, "can_send", return_value=True)
+class TestPurdueClientEnvToken(unittest.TestCase):
+    @patch.object(PurdueClient, "can_send", return_value=True)
     @patch("requests.request")
     def test_env_token_used_in_headers(self,
                                        mock_req: MagicMock,
                                        _mock_can: MagicMock) -> None:
-        with patch.dict(os.environ, {"GROQ_API_KEY": "env_groq"}, clear=False):
-            client = GrokClient(max_requests=3)
+        with patch.dict(os.environ, {"GEN_AI_STUDIO_API_KEY": "env_groq"},
+                        clear=False):
+            client = PurdueClient(max_requests=3)
 
         resp = MagicMock()
         resp.ok = True
@@ -357,9 +358,10 @@ class TestGrokClientEnvToken(unittest.TestCase):
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer env_groq")
 
     def test_missing_env_raises_value_error(self) -> None:
-        with patch.dict(os.environ, {"GROQ_API_KEY": ""}, clear=False):
+        with patch.dict(os.environ, {"GEN_AI_STUDIO_API_KEY": ""},
+                        clear=False):
             with self.assertRaises(ValueError):
-                _ = GrokClient(max_requests=1)
+                _ = PurdueClient(max_requests=1)
 
 
 class TestHFClientEnvToken(unittest.TestCase):
