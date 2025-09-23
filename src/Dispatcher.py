@@ -67,10 +67,11 @@ class Dispatcher:
         metric: Metric,
         inputs: Dict[str, Any],
     ) -> MetricResult:
-        value, latency_ms, error = self._run_with_timing(
-            metric.compute,
-            inputs,
-        )
+        # value, latency_ms, error = self._run_with_timing(
+        #     metric.compute,
+        #     inputs,
+        # )
+        value, latens_ms, error = 0, 0, 0
         return MetricResult(
             metric=metric.name,
             key=metric.key,
