@@ -32,7 +32,7 @@ def _get_value_latency(res_map: Dict[str, MetricResult], key: str) \
                        -> tuple[float, int]:
     res = res_map.get(key)
     if res is None or res.value is None:
-        return 0.0, 0.0
+        return 0.0, 0
     try:
         val = float(res.value)
     except Exception:
@@ -40,7 +40,7 @@ def _get_value_latency(res_map: Dict[str, MetricResult], key: str) \
     try:
         lat = int(res.latency_ms)
     except Exception:
-        lat = 0.0
+        lat = 0
     return val, lat
 
 

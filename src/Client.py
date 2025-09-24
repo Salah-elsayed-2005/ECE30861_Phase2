@@ -310,12 +310,11 @@ class HFClient(Client):
         >>> client.request("GET", f"/api/models/{repo_id}")['cardData']
         """
         url = f"{self.base_url}{path}"
-        headers = {}
         try:
             logger.debug("%s request to %s", method, url)
             resp = requests.request(method=method,
                                     url=url,
-                                    headers=headers,
+                                    headers={},
                                     timeout=15,
                                     **kwargs)
         except requests.RequestException as e:
