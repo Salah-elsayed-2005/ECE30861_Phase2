@@ -8,14 +8,20 @@ fi
 
 case "$1" in
   install)
-    echo "[stub] Installing dependencies..."
+    # echo "[stub] Installing dependencies..."
     pip3 install --user -r requirements.txt
     exit 0
     ;;
   test)
-    echo "[stub] Running test suite..."
+    # echo "[stub] Running test suite..."
     # later: pytest with coverage
-    pytest --cov=src tests/*
+    python3 run_tests.py
+    exit 0
+    ;;
+  pytest)
+    # echo "[stub] Running test suite..."
+    # later: pytest with coverage
+    pytest --cov=src
     exit 0
     ;;
   *) # absolute path assumed = URL_FILE
