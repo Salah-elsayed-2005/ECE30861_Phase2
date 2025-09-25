@@ -739,17 +739,26 @@ class PerformanceClaimsMetric(Metric):
         if "model_url" not in inputs.keys():
             raise ValueError("No good link found in input dictionary")
 
+        model_url = inputs["model_url"]
+        model_id = model_url.split("https://huggingface.co/")[-1]
+        logger.info("Computing performance claims score for %s", model_id)
+
         try:
-            # try to get license from HFClient if possible
-            model_id = inputs['model_url'].split("https://huggingface.co/")[-1]
+            logger.debug("Fetching README via API for %s", model_id)
             card_data = self.hf_client.request(
                 "GET",
                 f"/{model_id}/resolve/main/README.md",
             ).splitlines()
+            source = "api"
         except Exception:
-            # if perms needed, get rendered text from the model page
-            url = inputs["model_url"]
-            card_data = injectHFBrowser(url).splitlines()
+            logger.info("Falling back to rendered page for %s", model_id)
+            rendered = injectHFBrowser(model_url)
+            card_data = rendered.splitlines()
+            source = "rendered_page"
+        logger.debug("Performance claims text source=%s lines=%d for %s",
+                     source,
+                     len(card_data),
+                     model_id)
 
         # We can only put so much into llm input
         # so we need to try to find text only relating benchmarks
@@ -760,6 +769,14 @@ class PerformanceClaimsMetric(Metric):
                 start = max(0, i - 5)
                 end = min(len(card_data), i + 5 + 1)
                 ranges.append((start, end))
+
+        logger.debug("Identified %d candidate snippet range(s) for %s",
+                     len(ranges),
+                     model_id)
+        if not ranges:
+            logger.info("No benchmark keywords detected for %s; " +
+                        "using fallback prompt context",
+                        model_id)
 
         # Merge overlapping ranges
         merged: list[list[int]] = []
@@ -778,6 +795,10 @@ class PerformanceClaimsMetric(Metric):
             if len(results) > 6000:
                 break
 
+        logger.debug("Prepared %d characters of performance evidence for %s",
+                     len(results),
+                     model_id)
+
         # Prompt the LLM to give score
         prompt = (
             f"given the following snippets from a readme: {results}"
@@ -786,6 +807,8 @@ class PerformanceClaimsMetric(Metric):
             "output a 0.0 if there are no performance claims or "
             "benchmark results. "
         )
+        logger.info("Querying LLM for performance claims evaluation on %s",
+                    model_id)
         response = self.grok_client.llm(prompt)
         new_prompt = ("Given this LLM output, please extract"
                       "the score it assigned and only output"
@@ -793,6 +816,10 @@ class PerformanceClaimsMetric(Metric):
                       f"response: {response}"
                       "the score should be either 0.0 or 1.0")
         score = float(self.grok_client.llm(new_prompt))
+
+        logger.info("Performance claims score for %s: %.1f",
+                    model_id,
+                    score)
 
         return score
 
@@ -1791,3 +1818,411 @@ class CodeQuality(Metric):
         except Exception:
             logger.info("Browser fetch failed for %s", url, exc_info=True)
             return ""
+
+
+class BusFactorMetric(Metric):
+    """
+    Bus factor proxy that prefers Hub data, then GitHub, then Grok, then a
+    constant fallback.
+
+    Decision paths (first match wins):
+      1) direct.commit_count_by_author -> inverse-HHI -> score
+      2) direct.commit_authors         -> unique authors -> score
+      3) direct.recent_unique_committers -> score
+      4) direct.unique_committers        -> score
+      5) hf.success  (HF commits -> inverse-HHI -> score)
+      6) github.success (git_url/github_url -> counts -> score)
+      7) grok.estimate
+      8) constant.fallback (eff = 2.0)
+
+    Score normalization:
+        score = clamp(eff / target_maintainers, 0.0, 1.0)
+
+    Notes:
+    - GitHub path clones the repo shallowly and uses `git shortlog -sne` to
+      count unique authors weighted by commit counts.
+    - HF path pages commits; gated/401/403/404 or empty marks HF unavailable.
+    """
+
+    name = "Bus Factor"
+    key = "bus_factor"
+
+    def __init__(
+        self,
+        hf_client: Optional[HFClient] = None,
+        grok_client: Optional[PurdueClient] = None,
+    ) -> None:
+        self.hf_client = hf_client or HFClient(
+            max_requests=10)
+        self.grok = grok_client or PurdueClient(
+            max_requests=100)
+
+    # ---------------- helpers ----------------
+
+    def _fetch_hf_commits(
+            self, client, model_id, branch="main", max_pages=100):
+        """Fetch all commit pages for a model repo."""
+        logger.debug("Fetching Hugging Face commits for %s:%s",
+                     model_id, branch)
+        all_commits = []
+        page = 0
+        while True:
+            commits = client.request(
+                "GET", f"/api/models/{model_id}/commits/{branch}?p={page}")
+            if not commits:
+                logger.debug("No commits returned for %s:%s on page %d",
+                             model_id, branch, page)
+                break
+            all_commits.extend(commits)
+            logger.debug("Fetched %d commits for %s:%s on page %d",
+                         len(commits), model_id, branch, page)
+            if len(commits) < 50:
+                break
+            page += 1
+            if page >= max_pages:
+                break
+        logger.debug("Total commits fetched for %s:%s -> %d",
+                     model_id, branch, len(all_commits))
+        return all_commits
+
+    def _process_commits(
+            self,
+            commit_data: list
+            ) -> tuple[dict[str, int], list[str], int, int]:
+        """Process commit data to extract author information"""
+        commit_count_by_author: dict[str, int] = {}
+        commit_authors: list[str] = []
+
+        for commit in commit_data:
+            authors = commit.get("authors", [])
+            if authors:
+                for author_info in authors:
+                    user = author_info.get("user", "unknown")
+                    commit_authors.append(user)
+                    commit_count_by_author[user] = (
+                        commit_count_by_author.get(user, 0) + 1
+                    )
+            else:
+                commit_authors.append("unknown")
+                commit_count_by_author["unknown"] = (
+                    commit_count_by_author.get("unknown", 0) + 1
+                )
+
+        num_commits = len(commit_data)
+        unique_committers = len(set(commit_authors))
+
+        logger.debug("Processed %d commits into %d unique committers",
+                     num_commits, unique_committers)
+
+        return (
+            commit_count_by_author, commit_authors,
+            num_commits, unique_committers)
+
+    def _calculate_effective_maintainers(
+            self, commit_count_by_author: dict[str, int]) -> float:
+        """Calculate effective maintainers using inverse HHI."""
+        counts = [max(0, int(v)) for v in commit_count_by_author.values()]
+        total = sum(counts)
+        if total > 0:
+            shares = [(c / total) for c in counts if c > 0]
+            hhi = sum(p * p for p in shares)
+            eff = 1.0 / hhi if hhi > 0 else 0.0
+        else:
+            eff = 0.0
+        logger.debug("Calculated effective maintainers %.2f from %d commits",
+                     eff, total)
+        return eff
+
+    def github_commit_counts(
+        self,
+        git: "GitClient",
+        include_merges: bool = False,
+    ) -> dict[str, int]:
+        """
+        Return commit counts per author for the local repo that
+        `git` points to.
+
+        Parameters
+    ----------
+        git : GitClient
+            Your rate-limited git client, already pointed at a local repo.
+        include_merges : bool
+            If False (default), exclude merge commits.
+
+        Returns
+        -------
+        dict[str, int]
+            Mapping of "author_key" -> commit count, where author_key is the
+            author's primary email if available, otherwise their display name.
+        """
+        args = ["shortlog", "-sne", "--all"]
+        if not include_merges:
+            args.append("--no-merges")
+
+        try:
+            logger.debug("Running git shortlog for repo %s", git.repo_path)
+            out = git.request(*args)
+        except RuntimeError:
+            # If the more detailed format fails (e.g., older git),
+            # try a simpler one
+            try:
+                logger.debug("Retrying git shortlog w/ fallback flags for %s",
+                             git.repo_path)
+                out = git.request("shortlog", "-sn", "--all")
+            except RuntimeError:
+                logger.info("Git shortlog failed for %s", git.repo_path,
+                            exc_info=True)
+                return {}
+
+        counts: dict[str, int] = {}
+        for raw in out.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+
+            # Typical -sne line: "  123\tAlice Example <alice@example.com>"
+            # Fallback -sn line:  "  123\tAlice Example"
+            try:
+                # split "<num>\t<rest>"
+                left, rest = line.split("\t", 1)
+                num = int(left.strip())
+                rest = rest.strip()
+            except ValueError:
+                # Some git outputs may use spaces; try last-ditch parse:
+                parts = line.split()
+                if not parts:
+                    continue
+                try:
+                    num = int(parts[0])
+                except ValueError:
+                    continue
+                rest = " ".join(parts[1:])
+
+            # Extract email if present; otherwise use name
+            # (prefer email as a stable key; fallback to name)
+            email_key = None
+            name_key = None
+
+            # Fast path for "<email>"
+            lt = rest.rfind("<")
+            gt = rest.rfind(">")
+            if lt != -1 and gt != -1 and gt > lt + 1:
+                email_key = rest[lt + 1:gt].strip().lower()
+                name_key = rest[:lt].strip()
+            else:
+                name_key = rest.strip()
+
+            key = email_key or name_key or "unknown"
+            counts[key] = counts.get(key, 0) + max(num, 0)
+
+        logger.debug("Derived commit counts for %d author(s)", len(counts))
+        return counts
+
+    def _estimate_bus_factor_with_grok(
+        self,
+        model_id: str,
+        grok_client: PurdueClient
+    ) -> float:
+        """
+        Use Grok to estimate bus factor when commit information is unavailable.
+
+        Parameters
+        ----------
+        model_id : str
+            The model repository identifier (e.g., "bigscience/bloom")
+        grok_client : PurdueClient
+            The Grok client instance to use for the estimation
+
+        Returns
+        -------
+        float
+            Estimated effective maintainers count (not normalized score)
+        """
+        prompt = (
+            f"Analyze this Hugging Face model repository: {model_id}\n\n"
+            "Based on the repository name and organization, estimate the bus "
+            "factor (number of effective maintainers).\n"
+            "Consider these factors:\n"
+            "- Large orgs (bigscience, google, microsoft, facebook): ~5-20\n"
+            "- Individual/small teams: ~1-3\n"
+            "- Well-known OSS projects: ~3-10\n"
+            "- Academic institutions: ~2-5\n\n"
+            "Respond with ONLY a single number. Example: 8.5"
+        )
+
+        try:
+            logger.info("Requesting Grok bus factor estimate for %s", model_id)
+            response = grok_client.llm(prompt)
+            text = str(response).strip()
+            match = re.search(r"\d+(?:\.\d+)?", text)
+            if match:
+                estimated = float(match.group(0))
+                # Clamp to reasonable bounds
+                eff = max(0.5, min(20.0, estimated))
+                logger.debug("Grok estimated %.2f effective" +
+                             "maintainers for %s",
+                             eff, model_id)
+                return eff
+            else:
+                raise RuntimeError(
+                    f"Grok response did not contain a valid number: {text}")
+        except Exception as e:
+            # If Grok fails, raise an error instead of falling back
+            logger.info("Grok estimation failed for %s",
+                        model_id, exc_info=True)
+            raise RuntimeError(f"Grok estimation failed: {e}") from e
+
+    def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
+        """
+        Flow:
+        1) github (local path, then remote URL)
+        2) huggingface model_url
+        3) grok estimate (if available)
+        4) constant fallback (eff = 2.0)
+        """
+        logger.info("Computing bus factor score")
+        error: Optional[str] = None
+
+        # --- ONE CHANGE: route GitHub URLs passed via model_url ---
+        model_url_raw = inputs.get("model_url")
+        if (isinstance(model_url_raw, str) and "github.com"
+                in model_url_raw and not inputs.get("github_url")):
+            inputs = {**inputs, "github_url": model_url_raw}
+            logger.debug("Routed model_url GitHub link to github_url input")
+        # ----------------------------------------------------------
+
+        # target maintainers → clamp to >= 1
+        try:
+            target = int(kwargs.get("target_maintainers", 5))
+        except Exception:
+            target = 5
+        target = max(1, target)
+
+        # Prefer injected clients; fall back to constructor defaults
+        hf = self.hf_client
+
+        # ---------------------------
+        # 1) GITHUB — local path
+        # ---------------------------
+        git_path = (
+            inputs.get("git_repo_path")
+            or inputs.get("github_local_path")
+        )
+        if isinstance(git_path, str) and git_path.strip():
+            try:
+                git_client = GitClient(max_requests=20, repo_path=git_path)
+                gh_counts = self.github_commit_counts(
+                    git_client, include_merges=False
+                )
+                if gh_counts:
+                    eff = self._calculate_effective_maintainers(gh_counts)
+                    score = max(0.0, min(1.0, eff / float(target)))
+                    logger.info("Bus factor via local repo %s: " +
+                                "eff=%.2f score=%.2f",
+                                git_path, eff, score)
+                    return score
+                logger.debug("Local repo %s yielded no commit data", git_path)
+            except RuntimeError as e:
+                logger.info("Local git analysis failed for %s", git_path,
+                            exc_info=True)
+                error = f"Git local error: {e}"
+
+        # ---------------------------
+        # 1b) GITHUB — remote URL
+        # ---------------------------
+        git_url = inputs.get("github_url") or inputs.get("git_url")
+        if isinstance(git_url, str) and git_url.strip():
+            try:
+                with tempfile.TemporaryDirectory(prefix="bf-") as tmp:
+                    dest = Path(tmp) / "repo"
+                    logger.debug("Cloning %s into %s", git_url, dest)
+                    subprocess.run(
+                        ["git", "clone", "--depth", "100", git_url, str(dest)],
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=60,
+                    )
+                    git_client = GitClient(
+                        max_requests=20, repo_path=str(dest)
+                    )
+                    gh_counts = self.github_commit_counts(
+                        git_client, include_merges=False
+                    )
+                    if gh_counts:
+                        eff = self._calculate_effective_maintainers(gh_counts)
+                        score = max(0.0, min(1.0, eff / float(target)))
+                        logger.info("Bus factor via cloned repo %s: " +
+                                    "eff=%.2f score=%.2f",
+                                    git_url, eff, score)
+                        return score
+                    logger.debug("Cloned repo %s returned no commit data",
+                                 git_url)
+            except (subprocess.SubprocessError, OSError) as e:
+                logger.info("Git clone failed for %s", git_url, exc_info=True)
+                error = f"Git clone error: {e}"
+
+        # ---------------------------
+        # 2) HUGGING FACE — model_url
+        # ---------------------------
+        model_url = inputs.get("model_url")
+        if isinstance(model_url, str) and model_url.strip() and hf is not None:
+            model_id = model_url.split("huggingface.co/", 1)[-1].strip("/")
+            tried: list[tuple[str, int]] = []
+            for br in (kwargs.get("branch", "main"), "master"):
+                try:
+                    commit_data = self._fetch_hf_commits(
+                        client=hf,
+                        model_id=model_id,
+                        branch=br,
+                        max_pages=100,
+                    )
+                    tried.append((br, len(commit_data or [])))
+                    if commit_data:
+                        (counts, _authors, num_c, uniq_c) = (
+                            self._process_commits(commit_data)
+                        )
+                        eff = self._calculate_effective_maintainers(counts)
+                        score = max(0.0, min(1.0, eff / float(target)))
+                        logger.info("Bus factor via HF commits %s (%s): " +
+                                    "eff=%.2f score=%.2f " +
+                                    "(commits=%d unique=%d)",
+                                    model_id, br, eff, score, num_c, uniq_c)
+                        return score
+                except RuntimeError as e:
+                    logger.info("HF commit fetch failed for %s on %s",
+                                model_id,
+                                br, exc_info=True)
+                    error = f"HF error on {br}: {e}"
+            if error is None:
+                error = "HF returned empty commit list"
+            logger.debug("HF attempts for %s: %s", model_id, tried)
+
+        # ---------------------------
+        # 3) GROK — estimate or error out
+        # ---------------------------
+        if self.grok is not None:
+            try:
+                model_id_for_grok = (
+                    model_id if isinstance(model_url, str) else "unknown"
+                )
+                logger.info("Falling back to Grok estimate for %s",
+                            model_id_for_grok)
+                eff = self._estimate_bus_factor_with_grok(
+                    model_id=model_id_for_grok,
+                    grok_client=self.grok,
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"All data sources failed. Last attempt (Grok) failed: {e}"
+                ) from e
+        else:
+            raise RuntimeError(
+                "All data sources failed and no Grok client available "
+                "for fallback estimation"
+            )
+
+        score = max(0.0, min(1.0, eff / float(target)))
+        logger.info("Bus factor final score: %.2f (eff=%.2f target=%d)",
+                    score, eff, target)
+        return score
