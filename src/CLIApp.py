@@ -41,7 +41,11 @@ def _validate_env_or_exit() -> None:
     # Validate log file path
     if not log_path_raw:
         fail("LOG_FILE is empty or unset")
+    if not log_path_raw.lower().endswith('.log'):
+        fail("LOG_FILE must end with .log")
     log_path = Path(log_path_raw)
+    if log_path.exists() and log_path.is_dir():
+        fail("LOG_FILE points to a directory, not a file path")
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as _f:
