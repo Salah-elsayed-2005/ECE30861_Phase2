@@ -739,17 +739,26 @@ class PerformanceClaimsMetric(Metric):
         if "model_url" not in inputs.keys():
             raise ValueError("No good link found in input dictionary")
 
+        model_url = inputs["model_url"]
+        model_id = model_url.split("https://huggingface.co/")[-1]
+        logger.info("Computing performance claims score for %s", model_id)
+
         try:
-            # try to get license from HFClient if possible
-            model_id = inputs['model_url'].split("https://huggingface.co/")[-1]
+            logger.debug("Fetching README via API for %s", model_id)
             card_data = self.hf_client.request(
                 "GET",
                 f"/{model_id}/resolve/main/README.md",
             ).splitlines()
+            source = "api"
         except Exception:
-            # if perms needed, get rendered text from the model page
-            url = inputs["model_url"]
-            card_data = injectHFBrowser(url).splitlines()
+            logger.info("Falling back to rendered page for %s", model_id)
+            rendered = injectHFBrowser(model_url)
+            card_data = rendered.splitlines()
+            source = "rendered_page"
+        logger.debug("Performance claims text source=%s lines=%d for %s",
+                     source,
+                     len(card_data),
+                     model_id)
 
         # We can only put so much into llm input
         # so we need to try to find text only relating benchmarks
@@ -760,6 +769,13 @@ class PerformanceClaimsMetric(Metric):
                 start = max(0, i - 5)
                 end = min(len(card_data), i + 5 + 1)
                 ranges.append((start, end))
+
+        logger.debug("Identified %d candidate snippet range(s) for %s",
+                     len(ranges),
+                     model_id)
+        if not ranges:
+            logger.info("No benchmark keywords detected for %s; using fallback prompt context",
+                        model_id)
 
         # Merge overlapping ranges
         merged: list[list[int]] = []
@@ -778,6 +794,10 @@ class PerformanceClaimsMetric(Metric):
             if len(results) > 6000:
                 break
 
+        logger.debug("Prepared %d characters of performance evidence for %s",
+                     len(results),
+                     model_id)
+
         # Prompt the LLM to give score
         prompt = (
             f"given the following snippets from a readme: {results}"
@@ -786,6 +806,8 @@ class PerformanceClaimsMetric(Metric):
             "output a 0.0 if there are no performance claims or "
             "benchmark results. "
         )
+        logger.info("Querying LLM for performance claims evaluation on %s",
+                    model_id)
         response = self.grok_client.llm(prompt)
         new_prompt = ("Given this LLM output, please extract"
                       "the score it assigned and only output"
@@ -793,6 +815,10 @@ class PerformanceClaimsMetric(Metric):
                       f"response: {response}"
                       "the score should be either 0.0 or 1.0")
         score = float(self.grok_client.llm(new_prompt))
+
+        logger.info("Performance claims score for %s: %.1f",
+                    model_id,
+                    score)
 
         return score
 
