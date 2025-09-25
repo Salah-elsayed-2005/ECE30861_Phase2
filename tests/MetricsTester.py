@@ -428,7 +428,7 @@ class TestBusFactorMetric(unittest.TestCase):
         mock_commit_counts: MagicMock,
         _mock_eff: MagicMock,
     ) -> None:
-        metric = BusFactorMetric()
+        metric = BusFactorMetric(grok_client=MagicMock())
 
         score = metric.compute({"git_repo_path": "/tmp/repo"},
                                target_maintainers=5)
@@ -451,7 +451,7 @@ class TestBusFactorMetric(unittest.TestCase):
         mock_commit_counts: MagicMock,
         _mock_eff: MagicMock,
     ) -> None:
-        metric = BusFactorMetric()
+        metric = BusFactorMetric(grok_client=MagicMock())
 
         score = metric.compute({"github_url": "https://github.com/acme/repo"})
 
