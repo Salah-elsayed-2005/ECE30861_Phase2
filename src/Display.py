@@ -58,8 +58,10 @@ def build_output_object(group: Dict[str, str], results: List[MetricResult]) \
     dquality_val, dquality_lat = _get_value_latency(res_map, "dataset_quality")
     cquality_val, cquality_lat = _get_value_latency(res_map, "code_quality")
     pclaim_val, pclaim_lat = _get_value_latency(res_map, "performance_claims")
+    bfact_val, bfact_lat = _get_value_latency(res_map, "bus_factor")
 
-    net_lat = 0.0
+    net_val = 0.0
+    net_lat = 0
 
     # Size score as multi-device object to match expected shape
     size_keys = ["raspberry_pi", "jetson_nano", "desktop_pc", "aws_server"]
@@ -85,13 +87,13 @@ def build_output_object(group: Dict[str, str], results: List[MetricResult]) \
     out: Dict[str, Any] = {}
     out["name"] = name
     out["category"] = "MODEL"
-    out["net_score"] = net_lat
+    out["net_score"] = net_val
     out["net_score_latency"] = net_lat
     out["ramp_up_time"] = ramp_val
     out["ramp_up_time_latency"] = ramp_lat
     # Optional/unknown metrics in our pipeline: set to 0.0
-    out["bus_factor"] = 0.0
-    out["bus_factor_latency"] = 0
+    out["bus_factor"] = bfact_val
+    out["bus_factor_latency"] = bfact_lat
     out["performance_claims"] = pclaim_val
     out["performance_claims_latency"] = pclaim_lat
     out["license"] = lic_val
