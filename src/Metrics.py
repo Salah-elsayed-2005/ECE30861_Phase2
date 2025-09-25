@@ -61,7 +61,8 @@ class Metric(ABC):
     key: str  # Identifier/slug for the metric (e.g., "license").
 
     @abstractmethod
-    def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
+    def compute(self, inputs: dict[str, Any],
+                **kwargs: Any) -> float | dict[str, float]:
         """
         Compute the metric score from parsed inputs.
 
@@ -74,8 +75,9 @@ class Metric(ABC):
 
         Returns
         -------
-        float
-            A score between 0.0 and 1.0.
+        float | dict[str, float]
+            Either a scalar score between 0.0 and 1.0 or a mapping of
+            device/platform identifiers to scores in that range.
         """
         raise NotImplementedError
 
@@ -352,12 +354,22 @@ class LicenseMetric(Metric):
 
 class SizeMetric(Metric):
     """
-    Metric that finds the model size in bits and converts it
-    to a score from 0 to 1 using a lookup table
+    Metric that estimates model footprint in bits and reports how well the
+    model fits on a set of representative devices.
     """
     name = "Model Size"
     key = "size_metric"
-    maxModelBits = 8e11  # Decieded on 100GB being too big
+    device_profiles: dict[str, tuple[float, float]] = {
+        # (memory in GB, relative throughput multiplier)
+        "raspberry_pi": (4.0, 0.35),
+        "jetson_nano": (8.0, 0.85),
+        "desktop_pc": (32.0, 1.0),
+        "aws_server": (128.0, 1.0),
+    }
+    device_capacity_bits: dict[str, int] = {
+        name: int(memory_gb * 1024**3 * 8 * perf_multiplier)
+        for name, (memory_gb, perf_multiplier) in device_profiles.items()
+    }
 
     commonModelFileEndings = [
         ".bin",
@@ -405,7 +417,8 @@ class SizeMetric(Metric):
         # when multiple precisions are present.
         return min(bits)
 
-    def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
+    def compute(self, inputs: dict[str, Any], **kwargs: Any) \
+            -> dict[str, float]:
         """
         Compute the metric score from parsed inputs.
 
@@ -420,8 +433,9 @@ class SizeMetric(Metric):
 
         Returns
         -------
-        float
-            A score between 0.0 and 1.0.
+        dict[str, float]
+            Mapping of deployment target to a score between 0.0 and 1.0 that
+            captures how well the model fits the device's capacity.
 
         Raises
         ------
@@ -439,7 +453,10 @@ class SizeMetric(Metric):
 
         bits = None
         # If we have access to safetensors, use that
-        have_safetensrs = 'safetensors' in card_data.keys()
+        keys: Iterable[str] = []
+        if isinstance(card_data, dict):
+            keys = list(card_data.keys())
+        have_safetensrs = 'safetensors' in keys
         if have_safetensrs and 'parameters' in card_data['safetensors'].keys():
             params = card_data['safetensors']['parameters']
             bits = self.extract_bits_from_saftensor(params)
@@ -469,25 +486,32 @@ class SizeMetric(Metric):
                 logger.debug("Estimated bits for %s from %d file(s): %s",
                              model_id, len(files_filtered), bits)
 
-        # Now that we have the bits, let's assign our score.
-        # This will be based on a log scale between the number of bits of
-        # the model and the number of bits in HF's biggest model.
-        # The log is there to smooth things out and we divide by a factor
-        # that will make the score approach 1 as the size fits into a
-        # Jetson Nano.
-        # Finally, we will clip between 0 and 1 in case of any extreme values.
-        # For the Jetson Nano parameters we just want the model file to be
-        # under 1.5GB (1.2e10 bits).
-        if bits <= 0:
-            logger.info("Size score for %s: %.2f (no size info)",
-                        model_id, 0.0)
-            return 0
-        score_raw = (1-math.log(bits / SizeMetric.maxModelBits))
-        score = score_raw / (1-math.log(1.2e10 / SizeMetric.maxModelBits))
-        score = min(score, 1)
-        score = max(score, 0)
-        logger.info("Size score for %s: %.2f", model_id, score)
-        return score
+        # Translate the bit-count into per-device deployability scores by
+        # comparing the footprint against each device capacity (memory adjusted
+        # by a throughput multiplier to reflect hardware speed) and clamping
+        # the resulting ratio to the [0, 1] range.
+        if bits is None or bits <= 0:
+            logger.info("Size scores for %s default to 0 (no size info)",
+                        model_id)
+            return {device: 0.0 for device in self.device_capacity_bits}
+
+        scores: dict[str, float] = {}
+        for device, capacity_bits in self.device_capacity_bits.items():
+            raw_score = capacity_bits / bits
+            clamped = max(0.0, min(raw_score, 1.0))
+            scores[device] = clamped
+            logger.debug(
+                "Size score for %s on %s: %.3f " +
+                "(capacity_bits=%s, model_bits=%s)",
+                model_id,
+                device,
+                clamped,
+                capacity_bits,
+                bits,
+            )
+
+        logger.info("Size scores for %s: %s", model_id, scores)
+        return scores
 
 
 class AvailabilityMetric(Metric):
@@ -684,6 +708,95 @@ class AvailabilityMetric(Metric):
         return score
 
 
+class PerformanceClaimsMetric(Metric):
+    """
+    Metric that inspects the model card/README to detect
+    reported benchmarks and performance claims.
+    """
+    name = "Performance Claims"
+    key = "performance_claims"
+
+    def __init__(self):
+        self.hf_client = HFClient(max_requests=100)
+        self.grok_client = PurdueClient(max_requests=100)
+
+    def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
+        """
+        Compute the metric score from parsed inputs.
+            Parsed inputs required by the metric. Must include a key called
+            'model_url' with its corresponding correct link
+
+        **kwargs : Any
+            Optional per-metric tuning parameters.
+            A score between 0.0 and 1.0.
+
+        Raises
+        ------
+        RuntimeError
+            If no valid HF model URL is found in the dict
+        """
+        # appropriate URL must be in the dict
+        if "model_url" not in inputs.keys():
+            raise ValueError("No good link found in input dictionary")
+
+        try:
+            # try to get license from HFClient if possible
+            model_id = inputs['model_url'].split("https://huggingface.co/")[-1]
+            card_data = self.hf_client.request(
+                "GET",
+                f"/{model_id}/resolve/main/README.md",
+            ).splitlines()
+        except Exception:
+            # if perms needed, get rendered text from the model page
+            url = inputs["model_url"]
+            card_data = injectHFBrowser(url).splitlines()
+
+        # We can only put so much into llm input
+        # so we need to try to find text only relating benchmarks
+        ranges = []
+        for i, line in enumerate(card_data):
+            words = ["benchmark", "performance", "accuracy", "eval"]
+            if any(word in line.lower() for word in words):
+                start = max(0, i - 5)
+                end = min(len(card_data), i + 5 + 1)
+                ranges.append((start, end))
+
+        # Merge overlapping ranges
+        merged: list[list[int]] = []
+        for start, end in sorted(ranges):
+            if not merged or start > merged[-1][1]:
+                merged.append([start, end])
+            else:
+                merged[-1][1] = max(merged[-1][1], end)
+
+        # Aggregate results into one string
+        results = ""
+        for start, end in merged:
+            results += "\n".join(card_data[start:end])
+            # just in case my original limits still
+            # capture too much text:
+            if len(results) > 6000:
+                break
+
+        # Prompt the LLM to give score
+        prompt = (
+            f"given the following snippets from a readme: {results}"
+            "output a 1.0 if the readme contains performance claims "
+            "with some form of benchmark test results. "
+            "output a 0.0 if there are no performance claims or "
+            "benchmark results. "
+        )
+        response = self.grok_client.llm(prompt)
+        new_prompt = ("Given this LLM output, please extract"
+                      "the score it assigned and only output"
+                      "the number and that's it. Here is the"
+                      f"response: {response}"
+                      "the score should be either 0.0 or 1.0")
+        score = float(self.grok_client.llm(new_prompt))
+
+        return score
+
+
 class DatasetQuality(Metric):
     """
     Evaluate dataset quality by combining reuse and community engagement.
@@ -707,6 +820,7 @@ class DatasetQuality(Metric):
         Parameters
         ----------
         inputs : dict[str, Any]
+
             Parser output that may contain dataset and/or model URLs.
         **kwargs : Any
             Unused placeholder for interface compatibility.

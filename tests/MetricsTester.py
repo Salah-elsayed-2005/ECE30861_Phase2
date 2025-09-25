@@ -9,8 +9,8 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 from src.Metrics import (AvailabilityMetric, CodeQuality, DatasetQuality,
-                         LicenseMetric, Metric, MetricResult, RampUpTime,
-                         SizeMetric)
+                         LicenseMetric, Metric, MetricResult,
+                         PerformanceClaimsMetric, RampUpTime, SizeMetric)
 
 
 class TestMetricResult(unittest.TestCase):
@@ -67,6 +67,16 @@ class TestMetricABC(unittest.TestCase):
         self.assertIsInstance(score, float)
         self.assertEqual(score, 0.5)
 
+        class DictMetric(Metric):
+            def compute(self, inputs: dict[str, object],
+                        **_: object) -> dict[str, float]:
+                return {"example": 1.0}
+
+        d = DictMetric()
+        map_score = d.compute({})
+        self.assertIsInstance(map_score, dict)
+        self.assertEqual(map_score, {"example": 1.0})
+
 
 class TestSizeMetric(unittest.TestCase):
     """Test the SizeMetric implementation without hitting the HF API."""
@@ -99,9 +109,10 @@ class TestSizeMetric(unittest.TestCase):
 
         metric = SizeMetric()
         inputs = {"model_url": "https://huggingface.co/acme/model"}
-        score = metric.compute(inputs)
+        scores = metric.compute(inputs)
 
-        self.assertEqual(score, 1.0)
+        expected_scores = {k: 1.0 for k in SizeMetric.device_capacity_bits}
+        self.assertEqual(scores, expected_scores)
         mock_client.request.assert_called_once_with(
             "GET",
             "/api/models/acme/model",
@@ -121,9 +132,10 @@ class TestSizeMetric(unittest.TestCase):
 
         metric = SizeMetric()
         inputs = {"model_url": "https://huggingface.co/acme/empty"}
-        score = metric.compute(inputs)
+        scores = metric.compute(inputs)
 
-        self.assertEqual(score, 0.0)
+        expected_scores = {k: 0.0 for k in SizeMetric.device_capacity_bits}
+        self.assertEqual(scores, expected_scores)
         mock_client.request.assert_called_once_with(
             "GET",
             "/api/models/acme/empty",
@@ -146,22 +158,23 @@ class TestSizeMetric(unittest.TestCase):
         mock_client = mock_hf_client_cls.return_value
         mock_client.request.return_value = {}
         mock_browse.return_value = [
-            ("weights/model.bin", 1000),
-            ("weights/model.pt", 3000),
+            ("weights/model.bin", 80_000_000_000),
+            ("weights/model.pt", 80_000_000_000),
             ("README.md", 10),
         ]
 
         metric = SizeMetric()
         inputs = {"model_url": "https://huggingface.co/acme/medium"}
-        score = metric.compute(inputs)
+        scores = metric.compute(inputs)
 
-        expected_bits = 8 * (1000 + 3000) / 2
-        denom = 1 - math.log(1.2e10 / SizeMetric.maxModelBits)
-        expected_score = 1 - math.log(expected_bits / SizeMetric.maxModelBits)
-        expected_score /= denom
-        expected_score = min(max(expected_score, 0.0), 1.0)
+        expected_bits = 8 * (80_000_000_000 + 80_000_000_000) / 2
+        expected_scores = {}
+        for device, capacity_bits in SizeMetric.device_capacity_bits.items():
+            raw = capacity_bits / expected_bits
+            expected_scores[device] = max(0.0, min(1.0, raw))
 
-        self.assertAlmostEqual(score, expected_score)
+        for device, expected_score in expected_scores.items():
+            self.assertAlmostEqual(scores[device], expected_score)
         mock_client.request.assert_called_once_with(
             "GET",
             "/api/models/acme/medium",
@@ -309,6 +322,96 @@ class TestLicenseMetric(unittest.TestCase):
 
         self.assertEqual(score, 0.75)
         self.assertEqual(mock_grok.llm.call_count, 2)
+
+
+class TestPerformanceClaimsMetric(unittest.TestCase):
+    """Validate PerformanceClaimsMetric behaviors with mocked dependencies."""
+
+    @patch("src.Metrics.PurdueClient")
+    @patch("src.Metrics.HFClient")
+    def test_requires_model_url(
+        self,
+        _mock_hf_client_cls: MagicMock,
+        _mock_grok_client_cls: MagicMock,
+    ) -> None:
+        metric = PerformanceClaimsMetric()
+        with self.assertRaises(ValueError):
+            metric.compute({})
+
+    @patch("src.Metrics.injectHFBrowser")
+    @patch("src.Metrics.PurdueClient")
+    @patch("src.Metrics.HFClient")
+    def test_uses_hf_readme_when_available(
+        self,
+        mock_hf_client_cls: MagicMock,
+        mock_grok_client_cls: MagicMock,
+        mock_inject: MagicMock,
+    ) -> None:
+        readme = """
+Intro line
+## Benchmark Results
+Accuracy: 91%
+Notes
+""".strip()
+        mock_client = mock_hf_client_cls.return_value
+        mock_client.request.return_value = readme
+
+        mock_grok = mock_grok_client_cls.return_value
+        mock_grok.llm.side_effect = [
+            "Claims detected. Score: 1.0",
+            "1.0",
+        ]
+
+        metric = PerformanceClaimsMetric()
+        result = metric.compute(
+            {"model_url": "https://huggingface.co/org/model"}
+        )
+
+        self.assertEqual(result, 1.0)
+        mock_client.request.assert_called_once_with(
+            "GET",
+            "/org/model/resolve/main/README.md",
+        )
+        mock_inject.assert_not_called()
+
+        first_prompt = mock_grok.llm.call_args_list[0][0][0]
+        self.assertIn("Benchmark Results", first_prompt)
+        self.assertIn("Accuracy: 91%", first_prompt)
+
+    @patch("src.Metrics.injectHFBrowser")
+    @patch("src.Metrics.PurdueClient")
+    @patch("src.Metrics.HFClient")
+    def test_falls_back_to_rendered_page_on_error(
+        self,
+        mock_hf_client_cls: MagicMock,
+        mock_grok_client_cls: MagicMock,
+        mock_inject: MagicMock,
+    ) -> None:
+        mock_client = mock_hf_client_cls.return_value
+        mock_client.request.side_effect = RuntimeError("403")
+
+        mock_inject.return_value = ("Overview\nPerformance " +
+                                    "figures show 80% accuracy")
+
+        mock_grok = mock_grok_client_cls.return_value
+        mock_grok.llm.side_effect = [
+            "No clear claims, score 0.0",
+            "0.0",
+        ]
+
+        metric = PerformanceClaimsMetric()
+        result = metric.compute(
+            {"model_url": "https://huggingface.co/org/slow-model"}
+        )
+
+        self.assertEqual(result, 0.0)
+        mock_client.request.assert_called_once()
+        model_url = "https://huggingface.co/org/slow-model"
+        mock_inject.assert_called_once_with(model_url)
+
+        first_prompt = mock_grok.llm.call_args_list[0][0][0]
+        self.assertIn("Performance figures", first_prompt)
+        self.assertLessEqual(len(first_prompt), 7000)
 
 
 class TestDatasetQualityMetric(unittest.TestCase):

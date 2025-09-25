@@ -94,10 +94,10 @@ class Dispatcher:
 
     def _run_with_timing(
         self,
-        func: Callable[..., float],
+        func: Callable[..., float | dict[str, float]],
         *args: Any,
         **kwargs: Any,
-    ) -> Tuple[float, float, Optional[str]]:
+    ) -> Tuple[float | dict[str, float], int, Optional[str]]:
         """Run ``func`` with timing, capturing the result or error."""
 
         start = time.perf_counter()
