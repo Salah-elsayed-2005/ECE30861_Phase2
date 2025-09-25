@@ -9,8 +9,8 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 from src.Metrics import (AvailabilityMetric, CodeQuality, DatasetQuality,
-                         LicenseMetric, Metric, MetricResult, RampUpTime,
-                         SizeMetric)
+                         LicenseMetric, Metric, MetricResult,
+                         PerformanceClaimsMetric, RampUpTime, SizeMetric)
 
 
 class TestMetricResult(unittest.TestCase):
@@ -322,6 +322,94 @@ class TestLicenseMetric(unittest.TestCase):
 
         self.assertEqual(score, 0.75)
         self.assertEqual(mock_grok.llm.call_count, 2)
+
+
+class TestPerformanceClaimsMetric(unittest.TestCase):
+    """Validate PerformanceClaimsMetric behaviors with mocked dependencies."""
+
+    @patch("src.Metrics.PurdueClient")
+    @patch("src.Metrics.HFClient")
+    def test_requires_model_url(
+        self,
+        _mock_hf_client_cls: MagicMock,
+        _mock_grok_client_cls: MagicMock,
+    ) -> None:
+        metric = PerformanceClaimsMetric()
+        with self.assertRaises(ValueError):
+            metric.compute({})
+
+    @patch("src.Metrics.injectHFBrowser")
+    @patch("src.Metrics.PurdueClient")
+    @patch("src.Metrics.HFClient")
+    def test_uses_hf_readme_when_available(
+        self,
+        mock_hf_client_cls: MagicMock,
+        mock_grok_client_cls: MagicMock,
+        mock_inject: MagicMock,
+    ) -> None:
+        readme = """
+Intro line
+## Benchmark Results
+Accuracy: 91%
+Notes
+""".strip()
+        mock_client = mock_hf_client_cls.return_value
+        mock_client.request.return_value = readme
+
+        mock_grok = mock_grok_client_cls.return_value
+        mock_grok.llm.side_effect = [
+            "Claims detected. Score: 1.0",
+            "1.0",
+        ]
+
+        metric = PerformanceClaimsMetric()
+        result = metric.compute(
+            {"model_url": "https://huggingface.co/org/model"}
+        )
+
+        self.assertEqual(result, 1.0)
+        mock_client.request.assert_called_once_with(
+            "GET",
+            "/org/model/resolve/main/README.md",
+        )
+        mock_inject.assert_not_called()
+
+        first_prompt = mock_grok.llm.call_args_list[0][0][0]
+        self.assertIn("Benchmark Results", first_prompt)
+        self.assertIn("Accuracy: 91%", first_prompt)
+
+    @patch("src.Metrics.injectHFBrowser")
+    @patch("src.Metrics.PurdueClient")
+    @patch("src.Metrics.HFClient")
+    def test_falls_back_to_rendered_page_on_error(
+        self,
+        mock_hf_client_cls: MagicMock,
+        mock_grok_client_cls: MagicMock,
+        mock_inject: MagicMock,
+    ) -> None:
+        mock_client = mock_hf_client_cls.return_value
+        mock_client.request.side_effect = RuntimeError("403")
+
+        mock_inject.return_value = "Overview\nPerformance figures show 80% accuracy"
+
+        mock_grok = mock_grok_client_cls.return_value
+        mock_grok.llm.side_effect = [
+            "No clear claims, score 0.0",
+            "0.0",
+        ]
+
+        metric = PerformanceClaimsMetric()
+        result = metric.compute(
+            {"model_url": "https://huggingface.co/org/slow-model"}
+        )
+
+        self.assertEqual(result, 0.0)
+        mock_client.request.assert_called_once()
+        mock_inject.assert_called_once_with("https://huggingface.co/org/slow-model")
+
+        first_prompt = mock_grok.llm.call_args_list[0][0][0]
+        self.assertIn("Performance figures", first_prompt)
+        self.assertLessEqual(len(first_prompt), 7000)
 
 
 class TestDatasetQualityMetric(unittest.TestCase):
