@@ -55,6 +55,7 @@ def build_output_object(group: Dict[str, str], results: List[MetricResult]) \
     avail_val, avail_lat = _get_value_latency(res_map, "availability_metric")
     dquality_val, dquality_lat = _get_value_latency(res_map, "dataset_quality")
     cquality_val, cquality_lat = _get_value_latency(res_map, "code_quality")
+    pclaim_val, pclaim_lat = _get_value_latency(res_map, "performance_claims")
 
     net_lat = 0.0
 
@@ -80,8 +81,8 @@ def build_output_object(group: Dict[str, str], results: List[MetricResult]) \
     # Optional/unknown metrics in our pipeline: set to 0.0
     out["bus_factor"] = 0.0
     out["bus_factor_latency"] = 0
-    out["performance_claims"] = 0.0
-    out["performance_claims_latency"] = 0
+    out["performance_claims"] = pclaim_val
+    out["performance_claims_latency"] = pclaim_lat
     out["license"] = lic_val
     out["license_latency"] = lic_lat
     out["size_score"] = size_obj
