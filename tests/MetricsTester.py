@@ -67,6 +67,16 @@ class TestMetricABC(unittest.TestCase):
         self.assertIsInstance(score, float)
         self.assertEqual(score, 0.5)
 
+        class DictMetric(Metric):
+            def compute(self, inputs: dict[str, object],
+                        **_: object) -> dict[str, float]:
+                return {"example": 1.0}
+
+        d = DictMetric()
+        map_score = d.compute({})
+        self.assertIsInstance(map_score, dict)
+        self.assertEqual(map_score, {"example": 1.0})
+
 
 class TestSizeMetric(unittest.TestCase):
     """Test the SizeMetric implementation without hitting the HF API."""
@@ -99,9 +109,10 @@ class TestSizeMetric(unittest.TestCase):
 
         metric = SizeMetric()
         inputs = {"model_url": "https://huggingface.co/acme/model"}
-        score = metric.compute(inputs)
+        scores = metric.compute(inputs)
 
-        self.assertEqual(score, 1.0)
+        expected_scores = {k: 1.0 for k in SizeMetric.device_capacity_bits}
+        self.assertEqual(scores, expected_scores)
         mock_client.request.assert_called_once_with(
             "GET",
             "/api/models/acme/model",
@@ -121,9 +132,10 @@ class TestSizeMetric(unittest.TestCase):
 
         metric = SizeMetric()
         inputs = {"model_url": "https://huggingface.co/acme/empty"}
-        score = metric.compute(inputs)
+        scores = metric.compute(inputs)
 
-        self.assertEqual(score, 0.0)
+        expected_scores = {k: 0.0 for k in SizeMetric.device_capacity_bits}
+        self.assertEqual(scores, expected_scores)
         mock_client.request.assert_called_once_with(
             "GET",
             "/api/models/acme/empty",
@@ -146,22 +158,23 @@ class TestSizeMetric(unittest.TestCase):
         mock_client = mock_hf_client_cls.return_value
         mock_client.request.return_value = {}
         mock_browse.return_value = [
-            ("weights/model.bin", 1000),
-            ("weights/model.pt", 3000),
+            ("weights/model.bin", 80_000_000_000),
+            ("weights/model.pt", 80_000_000_000),
             ("README.md", 10),
         ]
 
         metric = SizeMetric()
         inputs = {"model_url": "https://huggingface.co/acme/medium"}
-        score = metric.compute(inputs)
+        scores = metric.compute(inputs)
 
-        expected_bits = 8 * (1000 + 3000) / 2
-        denom = 1 - math.log(1.2e10 / SizeMetric.maxModelBits)
-        expected_score = 1 - math.log(expected_bits / SizeMetric.maxModelBits)
-        expected_score /= denom
-        expected_score = min(max(expected_score, 0.0), 1.0)
+        expected_bits = 8 * (80_000_000_000 + 80_000_000_000) / 2
+        expected_scores = {}
+        for device, capacity_bits in SizeMetric.device_capacity_bits.items():
+            raw = capacity_bits / expected_bits
+            expected_scores[device] = max(0.0, min(1.0, raw))
 
-        self.assertAlmostEqual(score, expected_score)
+        for device, expected_score in expected_scores.items():
+            self.assertAlmostEqual(scores[device], expected_score)
         mock_client.request.assert_called_once_with(
             "GET",
             "/api/models/acme/medium",

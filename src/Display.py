@@ -29,14 +29,16 @@ def _results_by_key(results: Iterable[MetricResult]) \
 
 
 def _get_value_latency(res_map: Dict[str, MetricResult], key: str) \
-                       -> tuple[float, int]:
+                       -> tuple[Any, int]:
     res = res_map.get(key)
     if res is None or res.value is None:
         return 0.0, 0
-    try:
-        val = float(res.value)
-    except Exception:
-        val = 0.0
+    val: Any = res.value
+    if isinstance(val, (int, float)):
+        try:
+            val = float(val)
+        except Exception:
+            val = 0.0
     try:
         lat = int(res.latency_ms)
     except Exception:
@@ -60,12 +62,21 @@ def build_output_object(group: Dict[str, str], results: List[MetricResult]) \
     net_lat = 0.0
 
     # Size score as multi-device object to match expected shape
-    size_obj = {
-        "raspberry_pi": size_val,
-        "jetson_nano": size_val,
-        "desktop_pc": size_val,
-        "aws_server": size_val,
-    }
+    size_keys = ["raspberry_pi", "jetson_nano", "desktop_pc", "aws_server"]
+    if isinstance(size_val, dict):
+        size_obj = {}
+        for device in size_keys:
+            raw_score = size_val.get(device, 0.0)
+            try:
+                size_obj[device] = float(raw_score)
+            except Exception:
+                size_obj[device] = 0.0
+    else:
+        try:
+            size_scalar = float(size_val)
+        except Exception:
+            size_scalar = 0.0
+        size_obj = {device: size_scalar for device in size_keys}
 
     model_url = group.get("model_url", "")
     name = _extract_model_name(model_url) if isinstance(model_url, str) else ""
