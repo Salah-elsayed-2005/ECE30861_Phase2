@@ -474,7 +474,8 @@ class TestBusFactorMetric(unittest.TestCase):
         mock_process: MagicMock,
         _mock_eff: MagicMock,
     ) -> None:
-        metric = BusFactorMetric(hf_client=MagicMock(), grok_client=MagicMock())
+        metric = BusFactorMetric(hf_client=MagicMock(),
+                                 grok_client=MagicMock())
 
         score = metric.compute(
             {"model_url": "https://huggingface.co/org/model"},
@@ -488,7 +489,8 @@ class TestBusFactorMetric(unittest.TestCase):
     @patch.object(BusFactorMetric, "_estimate_bus_factor_with_grok",
                   return_value=3.5)
     @patch.object(BusFactorMetric, "_fetch_hf_commits",
-                  side_effect=[RuntimeError("hf fail"), RuntimeError("hf fail")])
+                  side_effect=[RuntimeError("hf fail"),
+                               RuntimeError("hf fail")])
     @patch.object(BusFactorMetric, "github_commit_counts", return_value={})
     @patch("src.Metrics.GitClient")
     def test_grok_fallback_used_when_sources_fail(
@@ -498,9 +500,11 @@ class TestBusFactorMetric(unittest.TestCase):
         mock_fetch: MagicMock,
         mock_grok_estimate: MagicMock,
     ) -> None:
-        metric = BusFactorMetric(hf_client=MagicMock(), grok_client=MagicMock())
+        metric = BusFactorMetric(hf_client=MagicMock(),
+                                 grok_client=MagicMock())
 
-        score = metric.compute({"model_url": "https://huggingface.co/org/model"})
+        model_url = "https://huggingface.co/org/model"
+        score = metric.compute({"model_url": model_url})
 
         mock_git_client_cls.assert_not_called()
         self.assertEqual(mock_fetch.call_count, 2)
@@ -509,6 +513,7 @@ class TestBusFactorMetric(unittest.TestCase):
             grok_client=metric.grok,
         )
         self.assertAlmostEqual(score, 3.5 / 5.0)
+
 
 class TestDatasetQualityMetric(unittest.TestCase):
     """

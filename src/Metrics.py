@@ -1862,7 +1862,8 @@ class BusFactorMetric(Metric):
     def _fetch_hf_commits(
             self, client, model_id, branch="main", max_pages=100):
         """Fetch all commit pages for a model repo."""
-        logger.debug("Fetching Hugging Face commits for %s:%s", model_id, branch)
+        logger.debug("Fetching Hugging Face commits for %s:%s",
+                     model_id, branch)
         all_commits = []
         page = 0
         while True:
@@ -1965,7 +1966,7 @@ class BusFactorMetric(Metric):
             # If the more detailed format fails (e.g., older git),
             # try a simpler one
             try:
-                logger.debug("Retrying git shortlog with fallback flags for %s",
+                logger.debug("Retrying git shortlog w/ fallback flags for %s",
                              git.repo_path)
                 out = git.request("shortlog", "-sn", "--all")
             except RuntimeError:
@@ -2058,7 +2059,8 @@ class BusFactorMetric(Metric):
                 estimated = float(match.group(0))
                 # Clamp to reasonable bounds
                 eff = max(0.5, min(20.0, estimated))
-                logger.debug("Grok estimated %.2f effective maintainers for %s",
+                logger.debug("Grok estimated %.2f effective" +
+                             "maintainers for %s",
                              eff, model_id)
                 return eff
             else:
@@ -2066,7 +2068,8 @@ class BusFactorMetric(Metric):
                     f"Grok response did not contain a valid number: {text}")
         except Exception as e:
             # If Grok fails, raise an error instead of falling back
-            logger.info("Grok estimation failed for %s", model_id, exc_info=True)
+            logger.info("Grok estimation failed for %s",
+                        model_id, exc_info=True)
             raise RuntimeError(f"Grok estimation failed: {e}") from e
 
     def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
@@ -2114,7 +2117,8 @@ class BusFactorMetric(Metric):
                 if gh_counts:
                     eff = self._calculate_effective_maintainers(gh_counts)
                     score = max(0.0, min(1.0, eff / float(target)))
-                    logger.info("Bus factor via local repo %s: eff=%.2f score=%.2f",
+                    logger.info("Bus factor via local repo %s: " +
+                                "eff=%.2f score=%.2f",
                                 git_path, eff, score)
                     return score
                 logger.debug("Local repo %s yielded no commit data", git_path)
@@ -2148,10 +2152,12 @@ class BusFactorMetric(Metric):
                     if gh_counts:
                         eff = self._calculate_effective_maintainers(gh_counts)
                         score = max(0.0, min(1.0, eff / float(target)))
-                        logger.info("Bus factor via cloned repo %s: eff=%.2f score=%.2f",
+                        logger.info("Bus factor via cloned repo %s: " +
+                                    "eff=%.2f score=%.2f",
                                     git_url, eff, score)
                         return score
-                    logger.debug("Cloned repo %s returned no commit data", git_url)
+                    logger.debug("Cloned repo %s returned no commit data",
+                                 git_url)
             except (subprocess.SubprocessError, OSError) as e:
                 logger.info("Git clone failed for %s", git_url, exc_info=True)
                 error = f"Git clone error: {e}"
@@ -2178,11 +2184,14 @@ class BusFactorMetric(Metric):
                         )
                         eff = self._calculate_effective_maintainers(counts)
                         score = max(0.0, min(1.0, eff / float(target)))
-                        logger.info("Bus factor via HF commits %s (%s): eff=%.2f score=%.2f (commits=%d unique=%d)",
+                        logger.info("Bus factor via HF commits %s (%s): " +
+                                    "eff=%.2f score=%.2f " +
+                                    "(commits=%d unique=%d)",
                                     model_id, br, eff, score, num_c, uniq_c)
                         return score
                 except RuntimeError as e:
-                    logger.info("HF commit fetch failed for %s on %s", model_id,
+                    logger.info("HF commit fetch failed for %s on %s",
+                                model_id,
                                 br, exc_info=True)
                     error = f"HF error on {br}: {e}"
             if error is None:
@@ -2197,7 +2206,8 @@ class BusFactorMetric(Metric):
                 model_id_for_grok = (
                     model_id if isinstance(model_url, str) else "unknown"
                 )
-                logger.info("Falling back to Grok estimate for %s", model_id_for_grok)
+                logger.info("Falling back to Grok estimate for %s",
+                            model_id_for_grok)
                 eff = self._estimate_bus_factor_with_grok(
                     model_id=model_id_for_grok,
                     grok_client=self.grok,
