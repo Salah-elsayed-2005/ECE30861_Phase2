@@ -6,7 +6,8 @@ from src.Dispatcher import Dispatcher
 from src.Display import print_results
 from src.logging_utils import get_logger
 from src.Metrics import (AvailabilityMetric, CodeQuality, DatasetQuality,
-                         LicenseMetric, RampUpTime, SizeMetric)
+                         LicenseMetric, PerformanceClaimsMetric, RampUpTime,
+                         SizeMetric)
 from src.Parser import Parser
 
 logger = get_logger(__name__)
@@ -22,7 +23,8 @@ if __name__ == "__main__":
                              RampUpTime(),
                              AvailabilityMetric(),
                              DatasetQuality(),
-                             CodeQuality()])
+                             CodeQuality(),
+                             PerformanceClaimsMetric()])
     for group in url_groups:
         logger.debug("Dispatching metrics for group %s", group)
         results = dispatcher.dispatch(group)
