@@ -9,7 +9,7 @@ fi
 case "$1" in
   install)
     echo "[stub] Installing dependencies..."
-    pip install --user -r requirements.txt
+    pip3 install --user -r requirements.txt
     exit 0
     ;;
   test)
@@ -19,8 +19,8 @@ case "$1" in
     exit 0
     ;;
   *) # absolute path assumed = URL_FILE
-    echo "Running CLIApp(file)..."
-    python -m src.CLIApp $1
+    # echo "Running CLIApp(file)..."
+    python3 -m src.CLIApp $1
     exit 0
     ;;
 esac

@@ -5,17 +5,19 @@
 # THE REGEX INTO A DICT WHERE THE KEYS WILL
 # LINE UP BETWEEN THE REGEX AND THE OUTPUT
 
-import re
 from typing import Dict, List
+
+from src.logging_utils import get_logger
+
+logger = get_logger(__name__)
 
 
 class Parser:
     """
-    URL Parser to categorize input URLs into the following groups:
-    - model_url : Hugging Face model links
-    - dataset_url : Hugging Face dataset links
-    - git_url : GitHub repository links
-    - unknown : Any URL that does not match a known category
+    URL Parser for CSV-like lines where each line contains up to three
+    comma-separated URLs in the order: code (GitHub), dataset (HF dataset),
+    model (HF model). Empty fields are allowed and
+    represented as empty strings.
     """
 
     def __init__(self, filepath: str):
@@ -32,66 +34,70 @@ class Parser:
         The constructor compiles regular expressions for each
         category and immediately categorizes the provided URLs.
         """
-        # Regex dictionary keyed by category
         self.filepath = filepath
-        self.urls = self._loadUrls()
-        self.regex_dict: Dict[str, re.Pattern] = {
-            "dataset_url": re.compile(
-                r"https?://huggingface\.co/datasets/"
-                r"[A-Za-z0-9_.-]+(/[\w\-\.]+)?"),
-            "model_url": re.compile(
-                r"https?://huggingface\.co/(?!datasets/)"
-                r"[A-Za-z0-9_.-]+(/[\w\-\.]+)?"),
-            "git_url": re.compile(
-                r"https?://github\.com/"
-                r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"),
-        }
-        self.groups: Dict[str, str] = self._categorize()
+        self.lines = self._loadLines()
+        self.groups: List[Dict[str, str]] = self._categorize()
 
-    def _loadUrls(self) -> List[str]:
+    def _loadLines(self) -> List[str]:
         """
-        Read URLs from the provided text file.
+        Read raw lines from the provided text file.
+        Keeps empty cells separated by commas.
 
         Returns
         -------
         list[str]
-            List of non-empty, stripped URLs read from the file.
+            List of non-empty, stripped lines from the file.
         """
         with open(self.filepath, "r", encoding="utf-8") as f:
-            return [line.strip() for line in f if line.strip()]
+            lines = [line.strip() for line in f if line.strip()]
+        logger.info("Loaded %d non-empty line(s) from %s",
+                    len(lines),
+                    self.filepath)
+        return lines
 
-    def _categorize(self) -> Dict[str, str]:
+    def _categorize(self) -> List[Dict[str, str]]:
         """
-        Categorize URLs into groups based on regex patterns.
+        Parse each line and assign entries to categories in order:
+        code then dataset then model. Empty fields remain empty strings.
 
         Returns
         -------
-        dict[str, str]
-            Dictionary mapping category names to
-            lists of URLs.
+        list[dict[str, str]]
+            A list where each element corresponds to a line in the input
+            with keys: 'git_url', 'dataset_url', 'model_url'.
 
-        Notes
-        -----
-        Any URL not matched by a known pattern is added
-        to the 'unknown' category.
         """
-        result: Dict[str, str] = {}
+        results: List[Dict[str, str]] = []
+        for line in self.lines:
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) > 3:
+                parts = parts[:3]
+            elif len(parts) < 3:
+                parts += [""] * (3 - len(parts))
 
-        for url in self.urls:
-            for category, pattern in self.regex_dict.items():
-                if pattern.match(url):
-                    result[category] = url
-                    break
+            cleaned = [p if p.startswith("http") else "" for p in parts]
+            if not any(cleaned):
+                continue
 
-        return result
+            git_url, dataset_url, model_url = cleaned
+            group = {
+                "git_url": git_url,
+                "dataset_url": dataset_url,
+                "model_url": model_url,
+            }
+            results.append(group)
+            logger.debug("Parsed group %s", group)
 
-    def getGroups(self) -> Dict[str, str]:
+        return results
+
+    def getGroups(self) -> List[Dict[str, str]]:
         """
-        Return categorized URLs.
+        Return parsed URL groups per input line.
 
         Returns
         -------
-        dict[str, str]
-            Dictionary of categorized URLs by type.
+        list[dict[str, str]]
+            List of dictionaries with keys
+            'git_url', 'dataset_url', 'model_url'.
         """
-        return (self.groups)
+        return self.groups

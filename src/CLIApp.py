@@ -3,17 +3,29 @@
 import sys
 
 from src.Dispatcher import Dispatcher
-from src.Metrics import (AvailabilityMetric, LicenseMetric, RampUpTime,
-                         SizeMetric)
+from src.Display import print_results
+from src.logging_utils import get_logger
+from src.Metrics import (AvailabilityMetric, CodeQuality, DatasetQuality,
+                         LicenseMetric, RampUpTime, SizeMetric)
 from src.Parser import Parser
 
+logger = get_logger(__name__)
+
 if __name__ == "__main__":
-    parse = Parser(sys.argv[1])
-    urls_dict = parse.getGroups()
+    input_path = sys.argv[1]
+    logger.info("Starting CLI processing for %s", input_path)
+    parse = Parser(input_path)
+    url_groups = parse.getGroups()
 
     dispatcher = Dispatcher([LicenseMetric(),
                              SizeMetric(),
                              RampUpTime(),
-                             AvailabilityMetric()])
-    results = dispatcher.dispatch(parse.getGroups())
-    print(results)
+                             AvailabilityMetric(),
+                             DatasetQuality(),
+                             CodeQuality()])
+    for group in url_groups:
+        logger.debug("Dispatching metrics for group %s", group)
+        results = dispatcher.dispatch(group)
+        logger.debug("Metrics complete for group %s", group)
+        print_results(group, results)
+    logger.info("Finished processing %d group(s)", len(url_groups))

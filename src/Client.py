@@ -10,7 +10,12 @@ from typing import Any, Deque, List, Optional
 import requests
 from dotenv import load_dotenv
 
+from src.logging_utils import get_logger
+
 load_dotenv()  # Load keys from .env file
+
+
+logger = get_logger(__name__)
 
 
 class Client(ABC):
@@ -63,13 +68,15 @@ class Client(ABC):
         """
         if not self.can_send():
             msg = "Rate limit exceeded: request not allowed right now."
+            logger.info("Rate limit hit for %s", self.__class__.__name__)
             raise RuntimeError(msg)
+        logger.debug("Rate limit ok for %s", self.__class__.__name__)
         return self._send(*args, **kwargs)
 
 
-class GrokClient(Client):
+class PurdueClient(Client):
     """
-    Client for the Groq API that implements a per-class (process-local)
+    Client for the Purdue GenAI API that implements a per-class (process-local)
     rate limit shared across all instances.
 
     Notes
@@ -88,17 +95,17 @@ class GrokClient(Client):
     def __init__(self,
                  max_requests: int,
                  token: Optional[str] = None,
-                 base_url: str = "https://api.groq.com/openai/v1",
+                 base_url: str = "https://genai.rcac.purdue.edu/api",
                  window_seconds: float = 60.0) -> None:
         super().__init__()
         self.max_requests = max_requests
         self.window_seconds = window_seconds
         # Prefer explicit token; otherwise fall back to env var
         if token is None:
-            env_token = os.getenv("GROQ_API_KEY")
+            env_token = os.getenv("GEN_AI_STUDIO_API_KEY")
             if not env_token:
                 raise ValueError(
-                    "Missing Groq token: set GROQ_API_KEY or pass token"
+                    "Missing token: set GEN_AI_STUDIO_API_KEY or pass token"
                 )
             self.token = env_token
         else:
@@ -119,21 +126,21 @@ class GrokClient(Client):
         cutoff = now - self.window_seconds
 
         # Use the lock to avoid accessing same memory during multiprocessing
-        with GrokClient._lock:
+        with PurdueClient._lock:
             # Remove any requests from before the window
-            hist = GrokClient.request_history
+            hist = PurdueClient.request_history
             while hist and hist[0] <= cutoff:
                 hist.popleft()
 
             # If we can still make the request, we keep going
-            if len(GrokClient.request_history) < self.max_requests:
-                GrokClient.request_history.append(now)
+            if len(PurdueClient.request_history) < self.max_requests:
+                PurdueClient.request_history.append(now)
                 return True
         return False
 
     def _send(self, method: str, path: str, **kwargs: Any) -> Any:
         """
-        Perform an HTTP request to Grok’s API.
+        Perform an HTTP request to Purdue's API.
 
         Parameters
         ----------
@@ -159,29 +166,35 @@ class GrokClient(Client):
         >>> client.request("GET", "/models", params={"limit": 5})
         """
         url = f"{self.base_url}{path}"
-        headers = {"Authorization": f"Bearer {self.token}"}
+        headers = {"Authorization": f"Bearer {self.token}",
+                   "Content-Type": "application/json"}
         try:
+            logger.debug("%s request to %s", method, url)
             resp = requests.request(method=method,
                                     url=url,
                                     headers=headers,
                                     timeout=15,
                                     **kwargs)
         except requests.RequestException as e:
-            raise RuntimeError(f"Grok API request failed: {e}") from e
+            logger.info("Purdue API request failed: %s", e)
+            raise RuntimeError(f"Purdue API request failed: {e}") from e
 
         if not resp.ok:
-            msg = f"Grok API error {resp.status_code}: {resp.text}"
+            msg = f"Purdue API error {resp.status_code}: {resp.text}"
+            logger.info("Purdue API error %s for %s", resp.status_code, url)
             raise RuntimeError(msg)
 
         # Try to parse JSON, else return text
         try:
+            logger.debug("Purdue API returned JSON for %s", url)
             return resp.json()
         except ValueError:
+            logger.debug("Purdue API returned text for %s", url)
             return resp.text
 
     def llm(self, message: str) -> str:
         """
-        Run the ``llama-3.1-8b-instant`` model on the given input and
+        Run the ``llama-3.1-8b`` model on the given input and
         return the assistant's response text.
 
         Parameters
@@ -198,8 +211,9 @@ class GrokClient(Client):
             "POST",
             "/chat/completions",
             json={
-                "model": "llama-3.1-8b-instant",
+                "model": "llama3.1:latest",
                 "messages": [{"role": "user", "content": message}],
+                "stream": False,
             },
         )
 
@@ -207,7 +221,8 @@ class GrokClient(Client):
         try:
             return completion["choices"][0]["message"]["content"]
         except Exception as e:  # pragma: no cover - defensive parsing
-            raise RuntimeError("Unexpected Groq API response format") from e
+            logger.info("Unexpected Purdue API response format: %s", e)
+            raise RuntimeError("Unexpected Purdue API response format") from e
 
 
 class HFClient(Client):
@@ -238,15 +253,7 @@ class HFClient(Client):
         self.window_seconds = window_seconds
         self.base_url = base_url
         # Prefer explicit token; otherwise fall back to env var
-        if token is None:
-            env_token = os.getenv("HF_TOKEN")
-            if not env_token:
-                raise ValueError(
-                    "Missing HF token: set HF_TOKEN or pass token"
-                )
-            self.token = env_token
-        else:
-            self.token = token
+        self.token = token
 
     def can_send(self) -> bool:
         """
@@ -303,24 +310,28 @@ class HFClient(Client):
         >>> client.request("GET", f"/api/models/{repo_id}")['cardData']
         """
         url = f"{self.base_url}{path}"
-        headers = {"Authorization": f"Bearer {self.token}"}
         try:
+            logger.debug("%s request to %s", method, url)
             resp = requests.request(method=method,
                                     url=url,
-                                    headers=headers,
+                                    headers={},
                                     timeout=15,
                                     **kwargs)
         except requests.RequestException as e:
+            logger.info("HF API request failed: %s", e)
             raise RuntimeError(f"HF API request failed: {e}") from e
 
         if not resp.ok:
             msg = f"HF API error {resp.status_code}: {resp.text}"
+            logger.info("HF API error %s for %s", resp.status_code, url)
             raise RuntimeError(msg)
 
         # Try to parse JSON, else return text
         try:
+            logger.debug("HF API returned JSON for %s", url)
             return resp.json()
         except ValueError:
+            logger.debug("HF API returned text for %s", url)
             return resp.text
 
 
@@ -402,6 +413,7 @@ class GitClient(Client):
         >>> client.request("status", "--porcelain")
         """
         cmd = ["git", *git_args]
+        logger.debug("Running git command: %s", " ".join(cmd))
         try:
             proc = subprocess.run(
                 cmd,
@@ -412,12 +424,16 @@ class GitClient(Client):
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as e:
+            logger.info("Git command failed: %s", e)
             raise RuntimeError(f"Git command failed to run: {e}") from e
 
         if proc.returncode != 0:
             err = proc.stderr.strip() or "unknown git error"
+            logger.info("Git command error %s: %s", proc.returncode, err)
             raise RuntimeError(f"Git command error {proc.returncode}: {err}")
 
+        logger.debug("Git command succeeded with %d bytes of output",
+                     len(proc.stdout or ""))
         return (proc.stdout or "").rstrip("\n")
 
     def list_files(self) -> List[str]:
@@ -442,8 +458,4 @@ class GitClient(Client):
 
 
 if __name__ == "__main__":
-
-    grok = GrokClient(max_requests=3, token="Placeholder")
-    for _ in range(5):
-        print(grok.llm("hello there"))
-        print("\n\\n")
+    pass
