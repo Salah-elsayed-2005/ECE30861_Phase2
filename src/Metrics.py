@@ -453,9 +453,9 @@ class SizeMetric(Metric):
 
         bits = None
         # If we have access to safetensors, use that
-        keys = []
+        keys: Iterable[str] = []
         if isinstance(card_data, dict):
-            keys = card_data.keys()
+            keys = list(card_data.keys())
         have_safetensrs = 'safetensors' in keys
         if have_safetensrs and 'parameters' in card_data['safetensors'].keys():
             params = card_data['safetensors']['parameters']
@@ -501,7 +501,8 @@ class SizeMetric(Metric):
             clamped = max(0.0, min(raw_score, 1.0))
             scores[device] = clamped
             logger.debug(
-                "Size score for %s on %s: %.3f (capacity_bits=%s, model_bits=%s)",
+                "Size score for %s on %s: %.3f " +
+                "(capacity_bits=%s, model_bits=%s)",
                 model_id,
                 device,
                 clamped,
@@ -795,6 +796,7 @@ class PerformanceClaimsMetric(Metric):
 
         return score
 
+
 class DatasetQuality(Metric):
     """
     Evaluate dataset quality by combining reuse and community engagement.
@@ -826,7 +828,6 @@ class DatasetQuality(Metric):
         Returns
         -------
         float
-           
             Weighted dataset quality score clamped to ``[0.0, 1.0]``.
         """
 

@@ -390,7 +390,8 @@ Notes
         mock_client = mock_hf_client_cls.return_value
         mock_client.request.side_effect = RuntimeError("403")
 
-        mock_inject.return_value = "Overview\nPerformance figures show 80% accuracy"
+        mock_inject.return_value = ("Overview\nPerformance " +
+                                    "figures show 80% accuracy")
 
         mock_grok = mock_grok_client_cls.return_value
         mock_grok.llm.side_effect = [
@@ -405,7 +406,8 @@ Notes
 
         self.assertEqual(result, 0.0)
         mock_client.request.assert_called_once()
-        mock_inject.assert_called_once_with("https://huggingface.co/org/slow-model")
+        model_url = "https://huggingface.co/org/slow-model"
+        mock_inject.assert_called_once_with(model_url)
 
         first_prompt = mock_grok.llm.call_args_list[0][0][0]
         self.assertIn("Performance figures", first_prompt)
