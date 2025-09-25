@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
 
-from src.Metrics import (AvailabilityMetric, CodeQuality, DatasetQuality,
-                         LicenseMetric, Metric, MetricResult,
+from src.Metrics import (AvailabilityMetric, BusFactorMetric, CodeQuality,
+                         DatasetQuality, LicenseMetric, Metric, MetricResult,
                          PerformanceClaimsMetric, RampUpTime, SizeMetric)
 
 
@@ -413,6 +413,102 @@ Notes
         self.assertIn("Performance figures", first_prompt)
         self.assertLessEqual(len(first_prompt), 7000)
 
+
+class TestBusFactorMetric(unittest.TestCase):
+    """Exercise BusFactorMetric decision branches with mocked sources."""
+
+    @patch.object(BusFactorMetric, "_calculate_effective_maintainers",
+                  return_value=3.0)
+    @patch.object(BusFactorMetric, "github_commit_counts",
+                  return_value={"alice@example.com": 10})
+    @patch("src.Metrics.GitClient")
+    def test_local_repo_path_uses_commit_counts(
+        self,
+        mock_git_client_cls: MagicMock,
+        mock_commit_counts: MagicMock,
+        _mock_eff: MagicMock,
+    ) -> None:
+        metric = BusFactorMetric()
+
+        score = metric.compute({"git_repo_path": "/tmp/repo"},
+                               target_maintainers=5)
+
+        mock_git_client_cls.assert_called_once_with(max_requests=20,
+                                                    repo_path="/tmp/repo")
+        mock_commit_counts.assert_called_once()
+        self.assertAlmostEqual(score, 3.0 / 5.0)
+
+    @patch.object(BusFactorMetric, "_calculate_effective_maintainers",
+                  return_value=4.0)
+    @patch.object(BusFactorMetric, "github_commit_counts",
+                  return_value={"alice": 4})
+    @patch("src.Metrics.GitClient")
+    @patch("src.Metrics.subprocess.run")
+    def test_remote_github_url_clones_and_scores(
+        self,
+        mock_subproc: MagicMock,
+        mock_git_client_cls: MagicMock,
+        mock_commit_counts: MagicMock,
+        _mock_eff: MagicMock,
+    ) -> None:
+        metric = BusFactorMetric()
+
+        score = metric.compute({"github_url": "https://github.com/acme/repo"})
+
+        self.assertTrue(mock_subproc.called)
+        self.assertTrue(mock_git_client_cls.called)
+        repo_path = mock_git_client_cls.call_args.kwargs["repo_path"]
+        self.assertTrue(str(repo_path).endswith("repo"))
+        mock_commit_counts.assert_called_once()
+        self.assertAlmostEqual(score, 4.0 / 5.0)
+
+    @patch.object(BusFactorMetric, "_calculate_effective_maintainers",
+                  return_value=2.0)
+    @patch.object(BusFactorMetric, "_process_commits",
+                  return_value=({"alice": 3}, ["alice"], 3, 1))
+    @patch.object(BusFactorMetric, "_fetch_hf_commits",
+                  return_value=[{"authors": [{"user": "alice"}]}])
+    def test_hf_commits_path_scores_when_available(
+        self,
+        mock_fetch: MagicMock,
+        mock_process: MagicMock,
+        _mock_eff: MagicMock,
+    ) -> None:
+        metric = BusFactorMetric(hf_client=MagicMock(), grok_client=MagicMock())
+
+        score = metric.compute(
+            {"model_url": "https://huggingface.co/org/model"},
+            target_maintainers=2,
+        )
+
+        mock_fetch.assert_called()
+        mock_process.assert_called()
+        self.assertAlmostEqual(score, 1.0)
+
+    @patch.object(BusFactorMetric, "_estimate_bus_factor_with_grok",
+                  return_value=3.5)
+    @patch.object(BusFactorMetric, "_fetch_hf_commits",
+                  side_effect=[RuntimeError("hf fail"), RuntimeError("hf fail")])
+    @patch.object(BusFactorMetric, "github_commit_counts", return_value={})
+    @patch("src.Metrics.GitClient")
+    def test_grok_fallback_used_when_sources_fail(
+        self,
+        mock_git_client_cls: MagicMock,
+        _mock_commit_counts: MagicMock,
+        mock_fetch: MagicMock,
+        mock_grok_estimate: MagicMock,
+    ) -> None:
+        metric = BusFactorMetric(hf_client=MagicMock(), grok_client=MagicMock())
+
+        score = metric.compute({"model_url": "https://huggingface.co/org/model"})
+
+        mock_git_client_cls.assert_not_called()
+        self.assertEqual(mock_fetch.call_count, 2)
+        mock_grok_estimate.assert_called_once_with(
+            model_id="org/model",
+            grok_client=metric.grok,
+        )
+        self.assertAlmostEqual(score, 3.5 / 5.0)
 
 class TestDatasetQualityMetric(unittest.TestCase):
     """
