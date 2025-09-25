@@ -154,8 +154,11 @@ class RampUpTime(Metric):
             raise ValueError("Missing required input: model_url")
 
         logger.info("Computing ramp-up score for %s", url)
-        # Fetch the full page text using Selenium
-        full_page_text = injectHFBrowser(url)
+        # Fetch the full page text using Selenium; if it fails, treat as empty
+        try:
+            full_page_text = injectHFBrowser(url)
+        except Exception:
+            full_page_text = ""
         usage_text = self._extract_usage_section(full_page_text)
 
         if usage_text:

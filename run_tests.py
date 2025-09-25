@@ -1,7 +1,8 @@
-import pytest
 import os
-import sys
 import re
+import sys
+
+import pytest
 
 if __name__ == "__main__":
     root_dir = os.path.abspath(os.path.dirname(__file__))
@@ -18,8 +19,8 @@ if __name__ == "__main__":
     ]
 
     # pytest returns exit code, but we also need its output
-    from io import StringIO
     from contextlib import redirect_stdout
+    from io import StringIO
 
     buf = StringIO()
     with redirect_stdout(buf):
