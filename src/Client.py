@@ -248,7 +248,7 @@ class PurdueClient(Client):
             "POST",
             "/chat/completions",
             json={
-                "model": "llama3.1:latest",
+                "model": "llama3.2:latest",
                 "messages": [{"role": "user", "content": message}],
                 "stream": False,
             },

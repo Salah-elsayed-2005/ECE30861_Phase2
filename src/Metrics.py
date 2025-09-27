@@ -247,7 +247,7 @@ class RampUpTime(Metric):
 
         llm_score = self._llm_ramp_rating(full_page_text)
 
-        score = (usage_score + llm_score) / 2.0
+        score = (llm_score + llm_score) / 2.0
 
         logger.info(
             "Ramp-up score for %s: usage=%.3f llm=%.3f combined=%.3f",
@@ -1836,8 +1836,9 @@ class CodeQuality(Metric):
 
         prompt = (
             "Rate the following Python code's engineering quality on a "
-            "scale from 0 to 1, where 0 is extremely poor and 1 is "
-            "excellent. Consider readability, structure, tests, and "
+            "scale from 0 to 1. 0 should be considered extremely poor,"
+            "0.5 should mean okay, 0.75 should mean solid, 0.9 means great,"
+            "and 1.0 means amazing. Consider readability, structure, tests, and "
             "maintainability. Respond with only the numeric rating.\n\n"
             f"```python\n{snippet}\n```"
         )
