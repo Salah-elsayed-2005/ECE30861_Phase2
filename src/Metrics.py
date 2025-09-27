@@ -246,8 +246,9 @@ class RampUpTime(Metric):
             usage_score = 0.0
 
         llm_score = self._llm_ramp_rating(full_page_text)
+        usage_score = 1 if usage_score > 0 else 0
 
-        score = (llm_score + llm_score) / 2.0
+        score = (usage_score + llm_score) / 2.0
 
         logger.info(
             "Ramp-up score for %s: usage=%.3f llm=%.3f combined=%.3f",
@@ -265,7 +266,7 @@ class RampUpTime(Metric):
             logger.debug("Empty model card text; defaulting LLM ramp score")
             return 0.5
 
-        context = shorten(page_text, width=4000, placeholder="...")
+        context = page_text
         prompt = (
             "You are evaluating how quickly a developer can start using a "
             "machine learning model based on its Hugging Face model card. "
