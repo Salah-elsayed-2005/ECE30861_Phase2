@@ -273,6 +273,7 @@ class RampUpTime(Metric):
             "Consider clarity of setup steps, code examples, dependencies, "
             "and overall guidance. Return a single number between 0 and 1 "
             "where 1 means very fast to ramp up and 0 means very hard. "
+            "If there is clearly no guidance, assign a zero score."
             "Respond with only the number.\n\n"
             f"Model card snippet:\n{context}"
         )
