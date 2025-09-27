@@ -251,6 +251,7 @@ class PurdueClient(Client):
                 "model": "llama3.2:latest",
                 "messages": [{"role": "user", "content": message}],
                 "stream": False,
+                "temperature": 0.0,
             },
         )
 

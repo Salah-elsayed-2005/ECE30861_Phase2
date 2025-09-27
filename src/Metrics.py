@@ -263,7 +263,7 @@ class RampUpTime(Metric):
 
         score = (usage_score + llm_score) / 2.0
         if usage_score:
-            score += 0.1
+            score = 1
 
         logger.info(
             "Ramp-up score for %s: usage=%s llm_scores=%s combined=%.3f",
@@ -941,44 +941,44 @@ class PerformanceClaimsMetric(Metric):
                      len(card_data),
                      model_id)
 
-        # We can only put so much into llm input
-        # so we need to try to find text only relating benchmarks
-        ranges = []
-        for i, line in enumerate(card_data):
-            words = ["benchmark", "performance", "accuracy", "eval"]
-            if any(word in line.lower() for word in words):
-                start = max(0, i - 5)
-                end = min(len(card_data), i + 5 + 1)
-                ranges.append((start, end))
+        # # We can only put so much into llm input
+        # # so we need to try to find text only relating benchmarks
+        # ranges = []
+        # for i, line in enumerate(card_data):
+        #     words = ["benchmark", "performance", "accuracy", "eval"]
+        #     if any(word in line.lower() for word in words):
+        #         start = max(0, i - 5)
+        #         end = min(len(card_data), i + 5 + 1)
+        #         ranges.append((start, end))
 
-        logger.debug("Identified %d candidate snippet range(s) for %s",
-                     len(ranges),
-                     model_id)
-        if not ranges:
-            logger.info("No benchmark keywords detected for %s; " +
-                        "using fallback prompt context",
-                        model_id)
+        # logger.debug("Identified %d candidate snippet range(s) for %s",
+        #              len(ranges),
+        #              model_id)
+        # if not ranges:
+        #     logger.info("No benchmark keywords detected for %s; " +
+        #                 "using fallback prompt context",
+        #                 model_id)
 
-        # Merge overlapping ranges
-        merged: list[list[int]] = []
-        for start, end in sorted(ranges):
-            if not merged or start > merged[-1][1]:
-                merged.append([start, end])
-            else:
-                merged[-1][1] = max(merged[-1][1], end)
+        # # Merge overlapping ranges
+        # merged: list[list[int]] = []
+        # for start, end in sorted(ranges):
+        #     if not merged or start > merged[-1][1]:
+        #         merged.append([start, end])
+        #     else:
+        #         merged[-1][1] = max(merged[-1][1], end)
 
-        # Aggregate results into one string
-        results = ""
-        for start, end in merged:
-            results += "\n".join(card_data[start:end])
-            # just in case my original limits still
-            # capture too much text:
-            if len(results) > 6000:
-                break
+        # # Aggregate results into one string
+        # results = ""
+        # for start, end in merged:
+        #     results += "\n".join(card_data[start:end])
+        #     # just in case my original limits still
+        #     # capture too much text:
+        #     if len(results) > 6000:
+        #         break
 
-        logger.debug("Prepared %d characters of performance evidence for %s",
-                     len(results),
-                     model_id)
+        # logger.debug("Prepared %d characters of performance evidence for %s",
+        #              len(results),
+        #              model_id)
 
         # Prompt the LLM to give score
         prompt = (
