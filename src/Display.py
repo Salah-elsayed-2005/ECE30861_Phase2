@@ -76,7 +76,9 @@ def build_output_object(group: Dict[str, str], results: List[MetricResult]) \
     pclaim_val, pclaim_lat = _get_value_latency(res_map, "performance_claims")
     bfact_val, bfact_lat = _get_value_latency(res_map, "bus_factor")
 
-    size_val_avg = 1#sum(size_val.values()) / len(size_val.values())
+    size_val_avg = 0.0
+    if isinstance(size_val, dict):
+        size_val_avg = sum(size_val.values()) / len(size_val.values()) 
     components = [ramp_val, lic_val, size_val_avg, avail_val,
                   dquality_val, cquality_val, pclaim_val, bfact_val]
     net_val = sum(components) / len(components) if components else 0.0
@@ -109,7 +111,7 @@ def build_output_object(group: Dict[str, str], results: List[MetricResult]) \
     out["category"] = "MODEL"
     out["net_score"] = net_val
     out["net_score_latency"] = net_lat
-    out["ramp_up_time"] = 1.0
+    out["ramp_up_time"] = ramp_val
     out["ramp_up_time_latency"] = ramp_lat
     # Optional/unknown metrics in our pipeline: set to 0.0
     out["bus_factor"] = bfact_val

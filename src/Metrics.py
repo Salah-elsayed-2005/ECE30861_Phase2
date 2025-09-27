@@ -245,9 +245,9 @@ class RampUpTime(Metric):
             logger.info("No usage guidance found for %s", url)
             usage_score = 0.0
 
-        llm_score = self._llm_ramp_rating(full_page_text)
+        llm_score = sum([self._llm_ramp_rating(full_page_text) for _ in range(3)])
         usage_score = 1 if usage_score > 0 else 0
-
+        llm_score/=3
         score = (usage_score + llm_score) / 2.0
 
         logger.info(
@@ -274,6 +274,8 @@ class RampUpTime(Metric):
             "and overall guidance. Return a single number between 0 and 1 "
             "where 1 means very fast to ramp up and 0 means very hard. "
             "If there is clearly no guidance, assign a zero score."
+            "Be somewhat generous in your scoring, while still being"
+            "rooted in reality."
             "Respond with only the number.\n\n"
             f"Model card snippet:\n{context}"
         )
@@ -1451,7 +1453,8 @@ class CodeQuality(Metric):
         if code_files:
             lint_score = self._lint_score(code_files)
             typing_score = self._typing_score(code_files)
-            llm_score = self._llm_code_rating(code_files)
+            llm_score = sum([self._llm_code_rating(code_files) for _ in range(3)])
+            llm_score /= 3
             score = (0*lint_score + 0*typing_score + 1*llm_score)
             score = max(0.0, min(1.0, score))
 
@@ -1841,7 +1844,8 @@ class CodeQuality(Metric):
             "scale from 0 to 1. 0 should be considered extremely poor,"
             "0.5 should mean okay, 0.75 should mean solid, 0.9 means great,"
             "and 1.0 means amazing. Consider readability, structure, tests, and "
-            "maintainability. Respond with only the numeric rating.\n\n"
+            "maintainability. Be somewhat generous while still being rooted" 
+            " in reality. Respond with only the numeric rating.\n\n"
             f"```python\n{snippet}\n```"
         )
 
