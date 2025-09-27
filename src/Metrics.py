@@ -239,18 +239,62 @@ class RampUpTime(Metric):
         if usage_text:
             char_count = len(usage_text)
             logger.debug("Usage text length for %s: %d", url, char_count)
+            usage_score = 1.0 / (1.0 + math.log1p(char_count / 500))
+            usage_score = max(0.0, min(usage_score, 1.0))
         else:
             logger.info("No usage guidance found for %s", url)
-            return 0.0
+            usage_score = 0.0
 
-        # Weight long instructions logarithmically so modest increases in
-        # length do not crater the score, while extremely long sections still
-        # reduce it meaningfully.
-        score = 1.0 / (1.0 + math.log1p(char_count / 500))
-        score = max(0.0, min(score, 1.0))
+        llm_score = self._llm_ramp_rating(full_page_text)
 
-        logger.info("Ramp-up score for %s: %.3f", url, score)
+        score = (usage_score + llm_score) / 2.0
+
+        logger.info(
+            "Ramp-up score for %s: usage=%.3f llm=%.3f combined=%.3f",
+            url,
+            usage_score,
+            llm_score,
+            score,
+        )
         return score
+
+    def _llm_ramp_rating(self, page_text: str) -> float:
+        """Ask the LLM to rate ramp-up difficulty from the model card."""
+
+        if not page_text:
+            logger.debug("Empty model card text; defaulting LLM ramp score")
+            return 0.5
+
+        context = shorten(page_text, width=4000, placeholder="...")
+        prompt = (
+            "You are evaluating how quickly a developer can start using a "
+            "machine learning model based on its Hugging Face model card. "
+            "Consider clarity of setup steps, code examples, dependencies, "
+            "and overall guidance. Return a single number between 0 and 1 "
+            "where 1 means very fast to ramp up and 0 means very hard. "
+            "Respond with only the number.\n\n"
+            f"Model card snippet:\n{context}"
+        )
+
+        def call() -> Any:
+            return self.grok.llm(prompt)
+
+        def parse(raw: Any) -> float:
+            value = _parse_numeric_response(raw)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"Ramp-up LLM score {value} outside [0, 1]")
+            return value
+
+        try:
+            return _call_llm_with_retry(
+                call,
+                parse,
+                description="Ramp-up LLM score",
+            )
+        except Exception:
+            logger.info("Ramp-up LLM scoring failed; defaulting to 0.5",
+                        exc_info=True)
+            return 0.5
 
 
 class LicenseMetric(Metric):

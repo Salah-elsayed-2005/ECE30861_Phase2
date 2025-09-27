@@ -198,6 +198,7 @@ class TestRampUpTimeMetric(unittest.TestCase):
         with self.assertRaises(ValueError):
             metric.compute({})
 
+    @patch.object(RampUpTime, "_llm_ramp_rating", return_value=0.6)
     @patch("src.Metrics.injectHFBrowser")
     @patch.object(RampUpTime, "_extract_usage_section")
     @patch("src.Metrics.PurdueClient")
@@ -208,6 +209,7 @@ class TestRampUpTimeMetric(unittest.TestCase):
         _mock_grok_client_cls: MagicMock,
         mock_extract: MagicMock,
         mock_inject: MagicMock,
+        mock_llm_rating: MagicMock,
     ) -> None:
         metric = RampUpTime()
         mock_inject.return_value = "full page text"
@@ -218,12 +220,15 @@ class TestRampUpTimeMetric(unittest.TestCase):
 
         mock_inject.assert_called_once_with(url)
         mock_extract.assert_called_once_with("full page text")
+        mock_llm_rating.assert_called_once_with("full page text")
 
         char_count = len("Example usage instructions")
-        expected = 1.0 / (1.0 + math.log1p(char_count / 500))
-        expected = max(0.0, min(expected, 1.0))
+        usage_part = 1.0 / (1.0 + math.log1p(char_count / 500))
+        usage_part = max(0.0, min(usage_part, 1.0))
+        expected = (usage_part + 0.6) / 2.0
         self.assertAlmostEqual(score, expected)
 
+    @patch.object(RampUpTime, "_llm_ramp_rating", return_value=0.4)
     @patch("src.Metrics.injectHFBrowser")
     @patch.object(RampUpTime, "_extract_usage_section")
     @patch("src.Metrics.PurdueClient")
@@ -234,6 +239,7 @@ class TestRampUpTimeMetric(unittest.TestCase):
         _mock_grok_client_cls: MagicMock,
         mock_extract: MagicMock,
         mock_inject: MagicMock,
+        mock_llm_rating: MagicMock,
     ) -> None:
         metric = RampUpTime()
         mock_inject.return_value = "full page text"
@@ -243,7 +249,8 @@ class TestRampUpTimeMetric(unittest.TestCase):
         score = metric.compute(input)
         mock_inject.assert_called_once()
         mock_extract.assert_called_once_with("full page text")
-        self.assertEqual(score, 0.0)
+        mock_llm_rating.assert_called_once_with("full page text")
+        self.assertAlmostEqual(score, 0.2)
 
 
 class TestLicenseMetric(unittest.TestCase):
