@@ -33,16 +33,28 @@ def _get_value_latency(res_map: Dict[str, MetricResult], key: str) \
     res = res_map.get(key)
     if res is None or res.value is None:
         return 0.0, 0
-    try:
-        val = float(res.value)  # type: ignore[arg-type]
-    except Exception:
-        val = 0.0
-    if val != val:  # NaN
-        val = 0.0
-    if val < 0.0:
-        val = 0.0
-    if val > 1.0:
-        val = 1.0
+    if not isinstance(res.value, dict):
+        try:            
+            val = float(res.value)  # type: ignore[arg-type]
+        except Exception:
+            val = 0.0
+        if val != val:  # NaN
+            val = 0.0
+        if val < 0.0:
+            val = 0.0
+        if val > 1.0:
+            val = 1.0
+    else:
+        val = res.value
+        for key in val.keys():
+            kval = float(val[key])
+            if kval != kval:
+                kval = 0.0
+            if kval < 0.0:
+                kval = 0.0
+            if kval > 1.0:
+                kval = 1.0
+            val[key] = kval
     try:
         lat = int(res.latency_ms)
     except Exception:
@@ -64,7 +76,8 @@ def build_output_object(group: Dict[str, str], results: List[MetricResult]) \
     pclaim_val, pclaim_lat = _get_value_latency(res_map, "performance_claims")
     bfact_val, bfact_lat = _get_value_latency(res_map, "bus_factor")
 
-    components = [ramp_val, lic_val, size_val, avail_val,
+    size_val_avg = sum(size_val.values()) / len(size_val.values())
+    components = [ramp_val, lic_val, size_val_avg, avail_val,
                   dquality_val, cquality_val, pclaim_val, bfact_val]
     net_val = sum(components) / len(components) if components else 0.0
     net_lat = ramp_lat + lic_lat + size_lat + avail_lat + \
