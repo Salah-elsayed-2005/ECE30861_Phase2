@@ -1450,7 +1450,7 @@ class CodeQuality(Metric):
             lint_score = self._lint_score(code_files)
             typing_score = self._typing_score(code_files)
             llm_score = self._llm_code_rating(code_files)
-            score = (0.1*lint_score + 0.1*typing_score + 0.8*llm_score)
+            score = (0*lint_score + 0*typing_score + 1*llm_score)
             score = max(0.0, min(1.0, score))
 
             self.last_details = {
