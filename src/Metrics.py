@@ -244,17 +244,16 @@ class RampUpTime(Metric):
         else:
             logger.info("No usage guidance found for %s", url)
             usage_score = 0.0
-
-        llm_score = sum([self._llm_ramp_rating(full_page_text) for _ in range(3)])
+        llm_scores = [self._llm_ramp_rating(full_page_text) for _ in range(3)]
+        llm_score = max(llm_scores)
         usage_score = 1 if usage_score > 0 else 0
-        llm_score/=3
         score = (usage_score + llm_score) / 2.0
 
         logger.info(
-            "Ramp-up score for %s: usage=%.3f llm=%.3f combined=%.3f",
+            "Ramp-up score for %s: usage=%.3f llm=%s combined=%.3f",
             url,
             usage_score,
-            llm_score,
+            llm_scores,
             score,
         )
         return score
@@ -1453,8 +1452,8 @@ class CodeQuality(Metric):
         if code_files:
             lint_score = self._lint_score(code_files)
             typing_score = self._typing_score(code_files)
-            llm_score = sum([self._llm_code_rating(code_files) for _ in range(3)])
-            llm_score /= 3
+            llm_scores = [self._llm_code_rating(code_files) for _ in range(3)]
+            llm_score = max(llm_scores)
             score = (0*lint_score + 0*typing_score + 1*llm_score)
             score = max(0.0, min(1.0, score))
 
