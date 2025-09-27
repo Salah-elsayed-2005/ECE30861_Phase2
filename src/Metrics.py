@@ -262,8 +262,6 @@ class RampUpTime(Metric):
         llm_score = max(llm_scores) if llm_scores else 0.5
 
         score = (usage_score + llm_score) / 2.0
-        if usage_score:
-            score = 1
 
         logger.info(
             "Ramp-up score for %s: usage=%s llm_scores=%s combined=%.3f",
