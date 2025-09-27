@@ -985,7 +985,7 @@ class PerformanceClaimsMetric(Metric):
             "the evidence step-by-step. After your reasoning, output a line "
             "'FINAL SCORE: <value>' where the value is 1.0 if benchmark-backed "
             "claims exist, otherwise 0.0. Snippets:\n"
-            f"{results}"
+            f"{''.join(card_data)}"
         )
         logger.info("Querying LLM for performance claims evaluation on %s",
                     model_id)
