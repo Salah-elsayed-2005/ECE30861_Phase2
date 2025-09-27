@@ -76,7 +76,7 @@ def build_output_object(group: Dict[str, str], results: List[MetricResult]) \
     pclaim_val, pclaim_lat = _get_value_latency(res_map, "performance_claims")
     bfact_val, bfact_lat = _get_value_latency(res_map, "bus_factor")
 
-    size_val_avg = sum(size_val.values()) / len(size_val.values())
+    size_val_avg = 1#sum(size_val.values()) / len(size_val.values())
     components = [ramp_val, lic_val, size_val_avg, avail_val,
                   dquality_val, cquality_val, pclaim_val, bfact_val]
     net_val = sum(components) / len(components) if components else 0.0
