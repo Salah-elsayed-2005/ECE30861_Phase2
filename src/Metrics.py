@@ -93,7 +93,7 @@ class RampUpTime(Metric):
     key = "ramp_up_time"
 
     def __init__(self):
-        self.client = HFClient(max_requests=3)
+        self.client = HFClient(max_requests=100)
         self.grok = PurdueClient(max_requests=100)
 
     def _extract_usage_section(self, text: str) -> str | None:
@@ -1241,7 +1241,7 @@ class CodeQuality(Metric):
         hf_client: Optional[HFClient] = None,
         grok_client: Optional[PurdueClient] = None,
     ) -> None:
-        self.hf_client = hf_client or HFClient(max_requests=10)
+        self.hf_client = hf_client or HFClient(max_requests=100)
         self.grok = grok_client or PurdueClient(max_requests=100)
         self.last_details: dict[str, Any] = {}
 
@@ -2113,7 +2113,7 @@ class BusFactorMetric(Metric):
         )
         if isinstance(git_path, str) and git_path.strip():
             try:
-                git_client = GitClient(max_requests=20, repo_path=git_path)
+                git_client = GitClient(max_requests=100, repo_path=git_path)
                 gh_counts = self.github_commit_counts(
                     git_client, include_merges=False
                 )

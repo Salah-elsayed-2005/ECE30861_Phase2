@@ -13,6 +13,9 @@ from src.Metrics import (AvailabilityMetric, BusFactorMetric, CodeQuality,
 from src.Parser import Parser
 
 logger = get_logger(__name__)
+from dotenv import load_dotenv
+load_dotenv()  # Load keys from .env file
+
 
 def _validate_env_or_exit() -> None:
     """Validate required environment variables and exit(1) if invalid.
@@ -33,7 +36,7 @@ def _validate_env_or_exit() -> None:
 
     # Validate GitHub token
     if not gh_token:
-        fail("GITHUB_TOKEN is empty or unset")
+        fail("GITHUBg_TOKEN is empty or unset")
     # Heuristic token format check
     if not (len(gh_token) >= 8 and (gh_token.startswith("ghp_") or gh_token.startswith("github_") or "_" in gh_token)):
         fail("GITHUB_TOKEN format appears invalid")
@@ -41,11 +44,7 @@ def _validate_env_or_exit() -> None:
     # Validate log file path
     if not log_path_raw:
         fail("LOG_FILE is empty or unset")
-    if not log_path_raw.lower().endswith('.log'):
-        fail("LOG_FILE must end with .log")
     log_path = Path(log_path_raw)
-    if log_path.exists() and log_path.is_dir():
-        fail("LOG_FILE points to a directory, not a file path")
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as _f:
