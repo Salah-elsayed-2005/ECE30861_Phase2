@@ -10,9 +10,9 @@ from unittest.mock import MagicMock, patch
 
 from src.Metrics import (AvailabilityMetric, BusFactorMetric, CodeQuality,
                          DatasetQuality, GIT_MAX_REQUESTS,
-                         GIT_WINDOW_SECONDS, LicenseMetric, Metric,
-                         MetricResult, PerformanceClaimsMetric, RampUpTime,
-                         SizeMetric)
+                         GIT_WINDOW_SECONDS, LLM_MAX_ATTEMPTS,
+                         LicenseMetric, Metric, MetricResult,
+                         PerformanceClaimsMetric, RampUpTime, SizeMetric)
 
 
 class TestMetricResult(unittest.TestCase):
@@ -313,17 +313,14 @@ class TestLicenseMetric(unittest.TestCase):
         }
 
         mock_grok = mock_grok_client_cls.return_value
-        mock_grok.llm.side_effect = [
-            "The model seems moderately permissive, score 0.75",
-            "0.75",
-        ]
+        mock_grok.llm.return_value = "The model seems moderately permissive, score 0.75"
 
         metric = LicenseMetric()
         inputs = {"model_url": "https://huggingface.co/acme/model"}
         score = metric.compute(inputs)
 
         self.assertEqual(score, 0.75)
-        self.assertEqual(mock_grok.llm.call_count, 2)
+        self.assertEqual(mock_grok.llm.call_count, 1)
 
 
 class TestPerformanceClaimsMetric(unittest.TestCase):
@@ -359,10 +356,7 @@ Notes
         mock_client.request.return_value = readme
 
         mock_grok = mock_grok_client_cls.return_value
-        mock_grok.llm.side_effect = [
-            "Claims detected. Score: 1.0",
-            "1.0",
-        ]
+        mock_grok.llm.return_value = "Claims detected. Score: 1.0"
 
         metric = PerformanceClaimsMetric()
         result = metric.compute(
@@ -396,10 +390,7 @@ Notes
                                     "figures show 80% accuracy")
 
         mock_grok = mock_grok_client_cls.return_value
-        mock_grok.llm.side_effect = [
-            "No clear claims, score 0.0",
-            "0.0",
-        ]
+        mock_grok.llm.return_value = "No clear claims, score 0.0"
 
         metric = PerformanceClaimsMetric()
         result = metric.compute(
@@ -915,7 +906,7 @@ class TestCodeQualityMetric(unittest.TestCase):
             score = metric._llm_code_rating({"a.py": "print('hi')"})
 
         self.assertEqual(score, 0.5)
-        grok_mock.llm.assert_called_once()
+        self.assertEqual(grok_mock.llm.call_count, LLM_MAX_ATTEMPTS)
 
     def test_llm_code_rating_uses_parse_helper(self) -> None:
         metric = CodeQuality(hf_client=MagicMock(), grok_client=MagicMock())
@@ -933,7 +924,7 @@ class TestCodeQualityMetric(unittest.TestCase):
             mock_parse = stack.enter_context(
                 patch.object(
                     CodeQuality,
-                    "_parse_llm_score",
+                    "_parse_llm_score_strict",
                     return_value=0.75,
                 )
             )
@@ -959,7 +950,7 @@ class TestCodeQualityMetric(unittest.TestCase):
 
         with patch.object(
             CodeQuality,
-            "_parse_llm_score",
+            "_parse_llm_score_strict",
             return_value=0.6,
         ) as mock_parse:
             score = metric._llm_card_rating("Some card text")
@@ -975,7 +966,7 @@ class TestCodeQualityMetric(unittest.TestCase):
         score = metric._llm_card_rating("card text")
 
         self.assertEqual(score, 0.3)
-        grok_mock.llm.assert_called_once()
+        self.assertEqual(grok_mock.llm.call_count, LLM_MAX_ATTEMPTS)
 
     def test_model_card_text_prefers_hf_api_bytes(self) -> None:
         hf_client = MagicMock()

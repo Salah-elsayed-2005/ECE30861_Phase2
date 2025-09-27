@@ -7,11 +7,12 @@ import math
 import re
 import subprocess
 import tempfile
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import shorten
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, TypeVar
 from urllib.parse import quote, urlparse
 
 from src.Client import GitClient, HFClient, PurdueClient
@@ -29,6 +30,64 @@ HF_MAX_REQUESTS = 120
 HF_WINDOW_SECONDS = 30.0
 GIT_MAX_REQUESTS = 40
 GIT_WINDOW_SECONDS = 30.0
+
+LLM_MAX_ATTEMPTS = 3
+LLM_RETRY_SLEEP_SECONDS = 0.2
+
+
+T = TypeVar("T")
+
+
+def _call_llm_with_retry(
+    call: Callable[[], Any],
+    parser: Callable[[Any], T],
+    *,
+    attempts: int = LLM_MAX_ATTEMPTS,
+    delay_seconds: float = LLM_RETRY_SLEEP_SECONDS,
+    description: str = "LLM call",
+) -> T:
+    """Invoke ``call`` until ``parser`` succeeds or attempts are exhausted."""
+
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max(attempts, 1) + 1):
+        try:
+            raw = call()
+            return parser(raw)
+        except Exception as exc:
+            last_error = exc
+            logger.info(
+                "%s attempt %d/%d failed: %s",
+                description,
+                attempt,
+                attempts,
+                exc,
+            )
+            if attempt < attempts and delay_seconds > 0:
+                time.sleep(delay_seconds)
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"{description} failed without raising an exception")
+
+
+def _parse_numeric_response(
+    raw: Any,
+    *,
+    allowed: Optional[Sequence[float]] = None,
+) -> float:
+    """Extract a numeric value from the LLM response, validating if needed."""
+
+    text = str(raw or "").strip()
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if not match:
+        raise ValueError("No numeric value found in LLM response")
+    value = float(match.group(0))
+    if allowed is not None:
+        for candidate in allowed:
+            if abs(candidate - value) < 1e-3:
+                return candidate
+        raise ValueError(f"LLM value {value} not in allowed set {allowed}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -353,21 +412,32 @@ class LicenseMetric(Metric):
             logger.debug("License not specified for %s", model_id)
             score = 0.0
         elif license_type not in self.license_scores:
-            # this grok call will likely never happen because all
-            # licenses not given on HF's license filter are labeled "other"
-            prompt = (f"Rank the this HuggingFace model: {model_id}. "
-                      "Give it of three scores, 1, 0.75, or 0.5. "
-                      "base your ranking on the rakings of this "
-                      "dictionary of licenses and their scores: "
-                      f"{str(self.license_scores)}")
-            response = self.grok_client.llm(prompt)
-            new_prompt = ("Given this LLM output, please extract"
-                          "the score it assigned and only output"
-                          "the number and that's it. Here is the"
-                          f"response: {response}")
-            score = float(self.grok_client.llm(new_prompt))
-            logger.debug("Derived license score %.2f for %s via LLM",
-                         score, model_id)
+            prompt = (
+                f"Rank the this HuggingFace model: {model_id}. "
+                "Return only one of the scores 1.0, 0.75, or 0.5 "
+                "based on how permissive the license appears. "
+                "Consider the following mapping for guidance: "
+                f"{self.license_scores}"
+            )
+
+            def call() -> Any:
+                return self.grok_client.llm(prompt)
+
+            def parse(raw: Any) -> float:
+                return _parse_numeric_response(raw, allowed=(0.5, 0.75, 1.0))
+
+            try:
+                score = _call_llm_with_retry(
+                    call,
+                    parse,
+                    description="License score LLM",
+                )
+                logger.debug("Derived license score %.2f for %s via LLM",
+                             score, model_id)
+            except Exception:
+                logger.info("LLM license scoring failed; defaulting to 0.5",
+                            exc_info=True)
+                score = 0.5
         else:
             score = self.license_scores[license_type]
             logger.debug("Found license %s with score %.2f for %s",
@@ -610,16 +680,19 @@ class AvailabilityMetric(Metric):
         {page_text}
         """
 
-        try:
-            raw = self.grok.llm(prompt)
-            import json
+        import json
+
+        def call() -> Any:
+            return self.grok.llm(prompt)
+
+        def parse(raw: Any) -> tuple[bool, bool, str, str]:
             text = (raw or "").strip()
             if text.startswith("```"):
                 text = text.strip('`')
             start = text.find("{")
             end = text.rfind("}")
             if start != -1 and end != -1 and end > start:
-                text = text[start:end+1]
+                text = text[start:end + 1]
             obj = json.loads(text)
             dataset = bool(obj.get("dataset_available", False))
             codebase = bool(obj.get("codebase_available", False))
@@ -628,9 +701,18 @@ class AvailabilityMetric(Metric):
             logger.debug("LLM availability result dataset=%s code=%s",
                          dataset, codebase)
             return (dataset, codebase, dataset_ev, codebase_ev)
+
+        try:
+            return _call_llm_with_retry(
+                call,
+                parse,
+                description="Availability JSON LLM",
+            )
         except Exception:
-            logger.info("LLM parsing failed; falling back to heuristics",
-                        exc_info=True)
+            logger.info(
+                "LLM availability parsing failed after retries; falling back",
+                exc_info=True,
+            )
             lower = page_text.lower()
             dataset_hits = any(
                 kw in lower for kw in [
@@ -846,17 +928,26 @@ class PerformanceClaimsMetric(Metric):
         )
         logger.info("Querying LLM for performance claims evaluation on %s",
                     model_id)
-        response = self.grok_client.llm(prompt)
-        new_prompt = ("Given this LLM output, please extract"
-                      "the score it assigned and only output"
-                      "the number and that's it. Here is the"
-                      f"response: {response}"
-                      "the score should be either 0.0 or 1.0")
-        score = float(self.grok_client.llm(new_prompt))
+        def call() -> Any:
+            return self.grok_client.llm(prompt)
 
-        logger.info("Performance claims score for %s: %.1f",
-                    model_id,
-                    score)
+        def parse(raw: Any) -> float:
+            return _parse_numeric_response(raw, allowed=(0.0, 1.0))
+
+        try:
+            score = _call_llm_with_retry(
+                call,
+                parse,
+                description="Performance claims LLM",
+            )
+        except Exception:
+            logger.info(
+                "Performance claims LLM failed after retries; defaulting to 0.0",
+                exc_info=True,
+            )
+            score = 0.0
+
+        logger.info("Performance claims score for %s: %.1f", model_id, score)
 
         return score
 
@@ -1707,11 +1798,15 @@ class CodeQuality(Metric):
             f"```python\n{snippet}\n```"
         )
 
+        def call() -> Any:
+            return self.grok.llm(prompt)
+
         try:
-            logger.debug("Requesting LLM code rating (snippet length %d)",
-                         len(snippet))
-            raw = self.grok.llm(prompt)
-            score = self._parse_llm_score(raw)
+            score = _call_llm_with_retry(
+                call,
+                self._parse_llm_score_strict,
+                description="Code quality LLM rating",
+            )
             logger.debug("LLM code rating %.3f", score)
             return score
         except Exception:
@@ -1746,11 +1841,15 @@ class CodeQuality(Metric):
             f"{shorten(card_text, width=3500, placeholder='...')}"
         )
 
+        def call() -> Any:
+            return self.grok.llm(prompt)
+
         try:
-            logger.debug("Requesting LLM card rating (text length %d)",
-                         len(card_text))
-            raw = self.grok.llm(prompt)
-            score = self._parse_llm_score(raw)
+            score = _call_llm_with_retry(
+                call,
+                self._parse_llm_score_strict,
+                description="Model card LLM rating",
+            )
             logger.debug("LLM card rating %.3f", score)
             return score
         except Exception:
@@ -1798,32 +1897,24 @@ class CodeQuality(Metric):
         logger.debug("Constructed code snippet of length %d", len(snippet))
         return snippet
 
+    def _parse_llm_score_strict(self, raw: Any) -> float:
+        """Strictly parse an LLM score ensuring it lies within ``[0, 1]``."""
+
+        value = _parse_numeric_response(raw)
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"LLM score {value} is outside [0, 1]")
+        return value
+
     def _parse_llm_score(self, raw: Any) -> float:
         """
-        Parse a numeric score from the LLM response text.
-
-        Parameters
-        ----------
-        raw : Any
-            Value returned by the LLM client.
-
-        Returns
-        -------
-        float
-            Clamped numeric score with ``0.5`` as the fallback when
-            parsing fails.
+        Backwards-compatible wrapper returning ``0.5`` on parsing failure.
         """
 
-        if raw is None:
-            logger.debug("LLM score parsing fallback (None)")
-            return 0.5
-        text = str(raw).strip()
         try:
-            value = float(text.split()[0])
-        except (ValueError, IndexError):
-            logger.debug("LLM score parsing fallback (invalid response)")
+            score = self._parse_llm_score_strict(raw)
+        except Exception:
+            logger.debug("LLM score parsing fallback to 0.5", exc_info=True)
             return 0.5
-        score = max(0.0, min(1.0, value))
         logger.debug("Parsed LLM score %.3f from response", score)
         return score
 
@@ -2107,26 +2198,28 @@ class BusFactorMetric(Metric):
             "Respond with ONLY a single number. Example: 8.5"
         )
 
-        try:
+        def call() -> Any:
             logger.info("Requesting Grok bus factor estimate for %s", model_id)
-            response = grok_client.llm(prompt)
-            text = str(response).strip()
-            match = re.search(r"\d+(?:\.\d+)?", text)
-            if match:
-                estimated = float(match.group(0))
-                # Clamp to reasonable bounds
-                eff = max(0.5, min(20.0, estimated))
-                logger.debug("Grok estimated %.2f effective" +
-                             "maintainers for %s",
-                             eff, model_id)
-                return eff
-            else:
-                raise RuntimeError(
-                    f"Grok response did not contain a valid number: {text}")
+            return grok_client.llm(prompt)
+
+        def parse(raw: Any) -> float:
+            estimated = _parse_numeric_response(raw)
+            eff = max(0.5, min(20.0, estimated))
+            logger.debug(
+                "Grok estimated %.2f effective maintainers for %s",
+                eff,
+                model_id,
+            )
+            return eff
+
+        try:
+            return _call_llm_with_retry(
+                call,
+                parse,
+                description="Bus factor LLM estimate",
+            )
         except Exception as e:
-            # If Grok fails, raise an error instead of falling back
-            logger.info("Grok estimation failed for %s",
-                        model_id, exc_info=True)
+            logger.info("Grok estimation failed for %s", model_id, exc_info=True)
             raise RuntimeError(f"Grok estimation failed: {e}") from e
 
     def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
