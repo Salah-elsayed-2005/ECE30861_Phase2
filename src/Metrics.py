@@ -31,6 +31,12 @@ HF_WINDOW_SECONDS = 30.0
 GIT_MAX_REQUESTS = 40
 GIT_WINDOW_SECONDS = 30.0
 
+RAMP_UP_LLM_ATTEMPTS = 3
+CODE_QUALITY_LLM_ATTEMPTS = 3
+
+LLM_SCORE_PATTERN = re.compile(r"FINAL\s*SCORE\s*[:=]\s*(-?\d+(?:\.\d+)?)",
+                               re.IGNORECASE)
+
 LLM_MAX_ATTEMPTS = 3
 LLM_RETRY_SLEEP_SECONDS = 0.2
 
@@ -75,13 +81,13 @@ def _parse_numeric_response(
     *,
     allowed: Optional[Sequence[float]] = None,
 ) -> float:
-    """Extract a numeric value from the LLM response, validating if needed."""
+    """Extract a numeric value from the LLM response using the FINAL SCORE tag."""
 
     text = str(raw or "").strip()
-    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    match = LLM_SCORE_PATTERN.search(text)
     if not match:
-        raise ValueError("No numeric value found in LLM response")
-    value = float(match.group(0))
+        raise ValueError("FINAL SCORE line not found in LLM response")
+    value = float(match.group(1))
     if allowed is not None:
         for candidate in allowed:
             if abs(candidate - value) < 1e-3:
@@ -236,21 +242,29 @@ class RampUpTime(Metric):
             full_page_text = ""
         usage_text = self._extract_usage_section(full_page_text)
 
-        if usage_text:
+        usage_available = bool(usage_text and usage_text.strip())
+        if usage_available and usage_text is not None:
             char_count = len(usage_text)
             logger.debug("Usage text length for %s: %d", url, char_count)
-            usage_score = 1.0 / (1.0 + math.log1p(char_count / 500))
-            usage_score = max(0.0, min(usage_score, 1.0))
         else:
             logger.info("No usage guidance found for %s", url)
-            usage_score = 0.0
-        llm_scores = [self._llm_ramp_rating(full_page_text) for _ in range(3)]
-        llm_score = max(llm_scores)
-        usage_score = 1 if usage_score > 0 else 0
+            lowered = (full_page_text or "").lower()
+            keywords = ("usage", "how to use", "quick start", "example", "setup", "getting started")
+            if any(kw in lowered for kw in keywords):
+                usage_available = True
+                logger.debug("Heuristic detected usage keywords for %s despite empty extraction", url)
+        usage_score = 1.0 if usage_available else 0.0
+
+        llm_scores = [
+            self._llm_ramp_rating(full_page_text)
+            for _ in range(RAMP_UP_LLM_ATTEMPTS)
+        ]
+        llm_score = max(llm_scores) if llm_scores else 0.5
+
         score = (usage_score + llm_score) / 2.0
 
         logger.info(
-            "Ramp-up score for %s: usage=%.3f llm=%s combined=%.3f",
+            "Ramp-up score for %s: usage=%s llm_scores=%s combined=%.3f",
             url,
             usage_score,
             llm_scores,
@@ -265,17 +279,14 @@ class RampUpTime(Metric):
             logger.debug("Empty model card text; defaulting LLM ramp score")
             return 0.5
 
-        context = page_text
+        context = shorten(page_text, width=4000, placeholder="...")
         prompt = (
             "You are evaluating how quickly a developer can start using a "
             "machine learning model based on its Hugging Face model card. "
-            "Consider clarity of setup steps, code examples, dependencies, "
-            "and overall guidance. Return a single number between 0 and 1 "
-            "where 1 means very fast to ramp up and 0 means very hard. "
-            "If there is clearly no guidance, assign a zero score."
-            "Be somewhat generous in your scoring, while still being"
-            "rooted in reality."
-            "Respond with only the number.\n\n"
+            "Think step-by-step about clarity of setup steps, code examples, "
+            "dependencies, and potential pitfalls. After your reasoning, "
+            "write a line in the format 'FINAL SCORE: <number>' where the "
+            "number is between 0 and 1 (1 = very fast ramp-up, 0 = very hard).\n\n"
             f"Model card snippet:\n{context}"
         )
 
@@ -460,11 +471,13 @@ class LicenseMetric(Metric):
             score = 0.0
         elif license_type not in self.license_scores:
             prompt = (
-                f"Rank the this HuggingFace model: {model_id}. "
-                "Return only one of the scores 1.0, 0.75, or 0.5 "
-                "based on how permissive the license appears. "
-                "Consider the following mapping for guidance: "
-                f"{self.license_scores}"
+                f"Evaluate the likely permissiveness of the license for "
+                f"the Hugging Face model '{model_id}'. Think through what the "
+                "license allows (redistribution, modification, commercial use, "
+                "etc.) using the following reference mapping: "
+                f"{self.license_scores}. After your reasoning, output a line "
+                "'FINAL SCORE: <value>' where the value is exactly 1.0, 0.75, "
+                "or 0.5, choosing the best match."
             )
 
             def call() -> Any:
@@ -967,11 +980,12 @@ class PerformanceClaimsMetric(Metric):
 
         # Prompt the LLM to give score
         prompt = (
-            f"given the following snippets from a readme: {results}"
-            "output a 1.0 if the readme contains performance claims "
-            "with some form of benchmark test results. "
-            "output a 0.0 if there are no performance claims or "
-            "benchmark results. "
+            "You will assess whether the provided README snippets include "
+            "performance claims backed by benchmark results. Think through "
+            "the evidence step-by-step. After your reasoning, output a line "
+            "'FINAL SCORE: <value>' where the value is 1.0 if benchmark-backed "
+            "claims exist, otherwise 0.0. Snippets:\n"
+            f"{results}"
         )
         logger.info("Querying LLM for performance claims evaluation on %s",
                     model_id)
@@ -1452,7 +1466,10 @@ class CodeQuality(Metric):
         if code_files:
             lint_score = self._lint_score(code_files)
             typing_score = self._typing_score(code_files)
-            llm_scores = [self._llm_code_rating(code_files) for _ in range(3)]
+            llm_scores = [
+                self._llm_code_rating(code_files)
+                for _ in range(CODE_QUALITY_LLM_ATTEMPTS)
+            ]
             llm_score = max(llm_scores)
             score = (0*lint_score + 0*typing_score + 1*llm_score)
             score = max(0.0, min(1.0, score))
@@ -1840,11 +1857,11 @@ class CodeQuality(Metric):
 
         prompt = (
             "Rate the following Python code's engineering quality on a "
-            "scale from 0 to 1. 0 should be considered extremely poor,"
-            "0.5 should mean okay, 0.75 should mean solid, 0.9 means great,"
-            "and 1.0 means amazing. Consider readability, structure, tests, and "
-            "maintainability. Be somewhat generous while still being rooted" 
-            " in reality. Respond with only the numeric rating.\n\n"
+            "scale from 0 to 1. 0 should be considered extremely poor, "
+            "0.5 should mean okay, 0.75 solid, 0.9 great, and 1.0 amazing. "
+            "Consider readability, structure, tests, and maintainability. "
+            "Think step-by-step, then output a line 'FINAL SCORE: <number>' "
+            "with the rating between 0 and 1.\n\n"
             f"```python\n{snippet}\n```"
         )
 
@@ -1885,9 +1902,10 @@ class CodeQuality(Metric):
 
         prompt = (
             "Based on this Hugging Face model card, estimate the quality "
-            "of the associated codebase. Return a number between 0 and 1 "
-            "(0=very poor, 1=excellent). Respond with only the numeric "
-            "rating.\n\n"
+            "of the associated codebase. Reflect on documentation clarity, "
+            "testing evidence, and engineering maturity. After your analysis, "
+            "write 'FINAL SCORE: <number>' where the number between 0 and 1 "
+            "summarizes your judgement.\n\n"
             f"{shorten(card_text, width=3500, placeholder='...')}"
         )
 
@@ -2245,7 +2263,8 @@ class BusFactorMetric(Metric):
             "- Individual/small teams: ~1-3\n"
             "- Well-known OSS projects: ~3-10\n"
             "- Academic institutions: ~2-5\n\n"
-            "Respond with ONLY a single number. Example: 8.5"
+            "Explain your reasoning briefly, then output 'FINAL SCORE: <number>' "
+            "with the estimated effective maintainer count."
         )
 
         def call() -> Any:

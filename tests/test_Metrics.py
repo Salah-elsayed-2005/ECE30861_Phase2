@@ -8,9 +8,11 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
 
-from src.Metrics import (AvailabilityMetric, BusFactorMetric, CodeQuality,
-                         DatasetQuality, GIT_MAX_REQUESTS,
-                         GIT_WINDOW_SECONDS, LLM_MAX_ATTEMPTS,
+from src.Metrics import (_call_llm_with_retry, _parse_numeric_response,
+                         AvailabilityMetric, BusFactorMetric, CodeQuality,
+                         CODE_QUALITY_LLM_ATTEMPTS, DatasetQuality,
+                         GIT_MAX_REQUESTS, GIT_WINDOW_SECONDS,
+                         LLM_MAX_ATTEMPTS, RAMP_UP_LLM_ATTEMPTS,
                          LicenseMetric, Metric, MetricResult,
                          PerformanceClaimsMetric, RampUpTime, SizeMetric)
 
@@ -220,13 +222,10 @@ class TestRampUpTimeMetric(unittest.TestCase):
 
         mock_inject.assert_called_once_with(url)
         mock_extract.assert_called_once_with("full page text")
-        mock_llm_rating.assert_called_once_with("full page text")
+        self.assertEqual(mock_llm_rating.call_count, RAMP_UP_LLM_ATTEMPTS)
 
-        char_count = len("Example usage instructions")
-        usage_part = 1.0 / (1.0 + math.log1p(char_count / 500))
-        usage_part = max(0.0, min(usage_part, 1.0))
-        expected = (usage_part + 0.6) / 2.0
-        #self.assertAlmostEqual(score, expected)
+        expected = (1.0 + 0.6) / 2.0
+        self.assertAlmostEqual(score, expected)
 
     @patch.object(RampUpTime, "_llm_ramp_rating", return_value=0.4)
     @patch("src.Metrics.injectHFBrowser")
@@ -249,8 +248,54 @@ class TestRampUpTimeMetric(unittest.TestCase):
         score = metric.compute(input)
         mock_inject.assert_called_once()
         mock_extract.assert_called_once_with("full page text")
-        mock_llm_rating.assert_called_once_with("full page text")
-        #self.assertAlmostEqual(score, 0.2)
+        self.assertEqual(mock_llm_rating.call_count, RAMP_UP_LLM_ATTEMPTS)
+        self.assertAlmostEqual(score, 0.2)
+
+    @patch.object(RampUpTime, "_llm_ramp_rating", return_value=0.5)
+    @patch.object(RampUpTime, "_extract_usage_section", return_value=None)
+    @patch("src.Metrics.injectHFBrowser")
+    def test_compute_usage_heuristic_detects_keywords(
+        self,
+        mock_inject: MagicMock,
+        mock_extract: MagicMock,
+        mock_llm: MagicMock,
+    ) -> None:
+        metric = RampUpTime()
+        mock_inject.return_value = "Quick start: run pip install"
+
+        score = metric.compute({"model_url": "https://huggingface.co/acme/model"})
+
+        mock_extract.assert_called_once_with("Quick start: run pip install")
+        self.assertEqual(mock_llm.call_count, RAMP_UP_LLM_ATTEMPTS)
+        self.assertGreaterEqual(score, 0.5)
+
+    def test_extract_usage_section_strips_result(self) -> None:
+        metric = RampUpTime.__new__(RampUpTime)
+        metric.grok = MagicMock()
+        metric.grok.llm.return_value = "  Use it like this  "
+
+        text = metric._extract_usage_section("full card")
+
+        self.assertEqual(text, "Use it like this")
+        metric.grok.llm.assert_called_once()
+
+    @patch.object(RampUpTime, "_llm_ramp_rating", return_value=0.5)
+    @patch.object(RampUpTime, "_extract_usage_section", return_value=None)
+    @patch("src.Metrics.injectHFBrowser", side_effect=RuntimeError("no browser"))
+    def test_compute_handles_browser_failure(
+        self,
+        _mock_inject: MagicMock,
+        mock_extract: MagicMock,
+        mock_llm: MagicMock,
+    ) -> None:
+        metric = RampUpTime()
+        score = metric.compute({"model_url": "https://huggingface.co/acme/model"})
+
+        mock_extract.assert_called_once_with("")
+        self.assertEqual(mock_llm.call_count, RAMP_UP_LLM_ATTEMPTS)
+        for call_args in mock_llm.call_args_list:
+            self.assertEqual(call_args.args[0], "")
+        self.assertAlmostEqual(score, 0.25)
 
 
 class TestLicenseMetric(unittest.TestCase):
@@ -320,7 +365,9 @@ class TestLicenseMetric(unittest.TestCase):
         }
 
         mock_grok = mock_grok_client_cls.return_value
-        mock_grok.llm.return_value = "The model seems moderately permissive, score 0.75"
+        mock_grok.llm.return_value = (
+            "The model seems moderately permissive.\nFINAL SCORE: 0.75"
+        )
 
         metric = LicenseMetric()
         inputs = {"model_url": "https://huggingface.co/acme/model"}
@@ -328,6 +375,30 @@ class TestLicenseMetric(unittest.TestCase):
 
         self.assertEqual(score, 0.75)
         self.assertEqual(mock_grok.llm.call_count, 1)
+
+    @patch("src.Metrics.time.sleep")
+    @patch("src.Metrics.PurdueClient")
+    @patch("src.Metrics.HFClient")
+    def test_unknown_license_llm_failure_defaults(
+        self,
+        mock_hf_client_cls: MagicMock,
+        mock_grok_client_cls: MagicMock,
+        _mock_sleep: MagicMock,
+    ) -> None:
+        mock_client = mock_hf_client_cls.return_value
+        mock_client.request.return_value = {
+            "cardData": {"license": "mystery-license"},
+        }
+
+        mock_grok = mock_grok_client_cls.return_value
+        mock_grok.llm.side_effect = RuntimeError("llm down")
+
+        metric = LicenseMetric()
+        inputs = {"model_url": "https://huggingface.co/acme/model"}
+        score = metric.compute(inputs)
+
+        self.assertEqual(score, 0.5)
+        self.assertEqual(mock_grok.llm.call_count, LLM_MAX_ATTEMPTS)
 
 
 class TestPerformanceClaimsMetric(unittest.TestCase):
@@ -363,7 +434,7 @@ Notes
         mock_client.request.return_value = readme
 
         mock_grok = mock_grok_client_cls.return_value
-        mock_grok.llm.return_value = "Claims detected. Score: 1.0"
+        mock_grok.llm.return_value = "Claims detected.\nFINAL SCORE: 1.0"
 
         metric = PerformanceClaimsMetric()
         result = metric.compute(
@@ -397,7 +468,7 @@ Notes
                                     "figures show 80% accuracy")
 
         mock_grok = mock_grok_client_cls.return_value
-        mock_grok.llm.return_value = "No clear claims, score 0.0"
+        mock_grok.llm.return_value = "No clear claims.\nFINAL SCORE: 0.0"
 
         metric = PerformanceClaimsMetric()
         result = metric.compute(
@@ -412,6 +483,26 @@ Notes
         first_prompt = mock_grok.llm.call_args_list[0][0][0]
         self.assertIn("Performance figures", first_prompt)
         self.assertLessEqual(len(first_prompt), 7000)
+
+    @patch("src.Metrics.time.sleep")
+    @patch("src.Metrics.injectHFBrowser", return_value="## Benchmarks\nAcc 92%")
+    @patch("src.Metrics.PurdueClient")
+    @patch("src.Metrics.HFClient")
+    def test_llm_failure_defaults_to_zero(
+        self,
+        _mock_hf_client_cls: MagicMock,
+        mock_grok_client_cls: MagicMock,
+        _mock_inject: MagicMock,
+        _mock_sleep: MagicMock,
+    ) -> None:
+        metric = PerformanceClaimsMetric()
+        mock_grok = mock_grok_client_cls.return_value
+        mock_grok.llm.side_effect = RuntimeError("llm down")
+
+        score = metric.compute({"model_url": "https://huggingface.co/org/model"})
+
+        self.assertEqual(score, 0.0)
+        self.assertEqual(mock_grok.llm.call_count, LLM_MAX_ATTEMPTS)
 
 
 class TestBusFactorMetric(unittest.TestCase):
@@ -669,7 +760,7 @@ class TestCodeQualityMetric(unittest.TestCase):
             )
             score = metric.compute({})
 
-        #self.assertAlmostEqual(score, (0.9 + 0.6 + 0.3) / 3)
+        self.assertAlmostEqual(score, 0.3)
         self.assertEqual(
             metric.last_details,
             {
@@ -683,7 +774,7 @@ class TestCodeQualityMetric(unittest.TestCase):
         mock_load.assert_called_once_with({})
         mock_lint.assert_called_once()
         mock_typing.assert_called_once()
-        mock_llm.assert_called_once()
+        self.assertEqual(mock_llm.call_count, CODE_QUALITY_LLM_ATTEMPTS)
 
     def test_compute_falls_back_to_model_card(self) -> None:
         metric = CodeQuality(hf_client=MagicMock(), grok_client=MagicMock())
@@ -795,7 +886,10 @@ class TestCodeQualityMetric(unittest.TestCase):
 
         self.assertEqual(metric._parse_llm_score("not a number"), 0.5)
         self.assertEqual(metric._parse_llm_score(None), 0.5)
-        self.assertEqual(metric._parse_llm_score("0.8 confident"), 0.8)
+        self.assertEqual(
+            metric._parse_llm_score("Reasoning\nFINAL SCORE: 0.8"),
+            0.8,
+        )
 
     def test_load_from_github_returns_empty_when_clone_fails(self) -> None:
         metric = CodeQuality(hf_client=MagicMock(), grok_client=MagicMock())
@@ -874,6 +968,34 @@ class TestCodeQualityMetric(unittest.TestCase):
         self.assertTrue(any(path.endswith("other.py") for path in files))
         mock_git_client_cls.assert_called_once()
 
+    def test_github_from_card_extracts_first_url(self) -> None:
+        metric = CodeQuality(hf_client=MagicMock(), grok_client=MagicMock())
+        card_text = "See repo at https://github.com/acme/model and more"
+        self.assertEqual(metric._github_from_card(card_text),
+                         "https://github.com/acme/model")
+
+    def test_github_from_card_returns_none_when_missing(self) -> None:
+        metric = CodeQuality(hf_client=MagicMock(), grok_client=MagicMock())
+        self.assertIsNone(metric._github_from_card("no links here"))
+
+    def test_lint_score_detects_style_issues(self) -> None:
+        metric = CodeQuality(hf_client=MagicMock(), grok_client=MagicMock())
+        code = {
+            "bad.py": "def foo():\n\tprint('tab')\n"
+        }
+        score = metric._lint_score(code)
+        self.assertLess(score, 1.0)
+
+    def test_typing_score_counts_annotations(self) -> None:
+        metric = CodeQuality(hf_client=MagicMock(), grok_client=MagicMock())
+        code = {
+            "typed.py": "def foo(x: int) -> int:\n    return x\n",
+            "untyped.py": "def bar(x):\n    return x\n",
+        }
+        score = metric._typing_score(code)
+        self.assertGreater(score, 0.0)
+        self.assertLess(score, 1.0)
+
     def test_code_snippet_enforces_character_budget(self) -> None:
         metric = CodeQuality(hf_client=MagicMock(), grok_client=MagicMock())
         code = {
@@ -918,27 +1040,19 @@ class TestCodeQualityMetric(unittest.TestCase):
     def test_llm_code_rating_uses_parse_helper(self) -> None:
         metric = CodeQuality(hf_client=MagicMock(), grok_client=MagicMock())
         grok_mock = cast(MagicMock, metric.grok)
-        grok_mock.llm.return_value = "0.75"
+        grok_mock.llm.return_value = "Analysis.\nFINAL SCORE: 0.75"
 
-        with ExitStack() as stack:
-            stack.enter_context(
-                patch.object(
-                    CodeQuality,
-                    "_code_snippet",
-                    return_value="print('hi')",
-                )
-            )
-            mock_parse = stack.enter_context(
-                patch.object(
-                    CodeQuality,
-                    "_parse_llm_score_strict",
-                    return_value=0.75,
-                )
-            )
-            score = metric._llm_code_rating({"a.py": "print('hi')"})
+        with patch.object(CodeQuality, "_code_snippet", return_value="print('hi')"):
+            with patch.object(CodeQuality, "_parse_llm_score_strict",
+                              return_value=0.75) as mock_parse:
+                score = metric._llm_code_rating({"a.py": "print('hi')"})
 
         self.assertEqual(score, 0.75)
-        mock_parse.assert_called_once_with("0.75")
+        mock_parse.assert_called_once()
+        self.assertEqual(
+            mock_parse.call_args.args[0],
+            "Analysis.\nFINAL SCORE: 0.75",
+        )
 
     def test_llm_card_rating_short_circuit_on_missing_text(self) -> None:
         metric = CodeQuality(hf_client=MagicMock(), grok_client=MagicMock())
@@ -953,7 +1067,7 @@ class TestCodeQualityMetric(unittest.TestCase):
     def test_llm_card_rating_uses_parse_helper(self) -> None:
         metric = CodeQuality(hf_client=MagicMock(), grok_client=MagicMock())
         grok_mock = cast(MagicMock, metric.grok)
-        grok_mock.llm.return_value = "0.6"
+        grok_mock.llm.return_value = "Thoughts.\nFINAL SCORE: 0.6"
 
         with patch.object(
             CodeQuality,
@@ -963,7 +1077,11 @@ class TestCodeQualityMetric(unittest.TestCase):
             score = metric._llm_card_rating("Some card text")
 
         self.assertEqual(score, 0.6)
-        mock_parse.assert_called_once_with("0.6")
+        mock_parse.assert_called_once()
+        self.assertEqual(
+            mock_parse.call_args.args[0],
+            "Thoughts.\nFINAL SCORE: 0.6",
+        )
 
     def test_llm_card_rating_returns_fallback_on_exception(self) -> None:
         metric = CodeQuality(hf_client=MagicMock(), grok_client=MagicMock())
@@ -1164,6 +1282,145 @@ class TestAvailabilityMetric(unittest.TestCase):
         self.assertTrue(codebase)
         self.assertIn("huggingface.co/datasets/acme/data", dataset_ev)
         self.assertIn("github.com/acme/model", codebase_ev)
+
+
+class TestMetricsHelpers(unittest.TestCase):
+    def test_call_llm_with_retry_eventually_succeeds(self) -> None:
+        call_count = 0
+
+        def call() -> str:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ValueError("temporary failure")
+            return "Reasoning\nFINAL SCORE: 0.7"
+
+        def parser(raw: str) -> float:
+            return _parse_numeric_response(raw)
+
+        with patch("src.Metrics.time.sleep") as mock_sleep:
+            value = _call_llm_with_retry(
+                call,
+                parser,
+                attempts=3,
+                delay_seconds=0.01,
+                description="retry test",
+            )
+
+        self.assertEqual(value, 0.7)
+        self.assertEqual(call_count, 2)
+        mock_sleep.assert_called_once()
+
+    def test_call_llm_with_retry_raises_after_max_attempts(self) -> None:
+        def call() -> str:
+            raise ValueError("always fails")
+
+        with patch("src.Metrics.time.sleep") as mock_sleep:
+            with self.assertRaises(ValueError):
+                _call_llm_with_retry(
+                    call,
+                    lambda raw: raw,
+                    attempts=2,
+                    delay_seconds=0.01,
+                    description="always fail",
+                )
+
+        self.assertEqual(mock_sleep.call_count, 1)
+
+    def test_parse_numeric_response_with_allowed_values(self) -> None:
+        self.assertEqual(
+            _parse_numeric_response("Thoughts...\nFINAL SCORE: 0.75", allowed=(0.5, 0.75)),
+            0.75,
+        )
+        with self.assertRaises(ValueError):
+            _parse_numeric_response("Reasoning\nFINAL SCORE: 0.8", allowed=(0.5, 0.75))
+        with self.assertRaises(ValueError):
+            _parse_numeric_response("No final score provided")
+
+
+class TestRampUpTimeHelpers(unittest.TestCase):
+    def test_extract_usage_section_handles_exception(self) -> None:
+        metric = RampUpTime.__new__(RampUpTime)
+        metric.grok = MagicMock()
+        metric.grok.llm.side_effect = RuntimeError("fail")
+
+        text = metric._extract_usage_section("card")
+
+        self.assertIsNone(text)
+        metric.grok.llm.assert_called_once()
+
+    def test_llm_ramp_rating_defaults_when_empty(self) -> None:
+        metric = RampUpTime.__new__(RampUpTime)
+        metric.grok = MagicMock()
+
+        score = RampUpTime._llm_ramp_rating(metric, "")
+
+        self.assertEqual(score, 0.5)
+        metric.grok.llm.assert_not_called()
+
+    def test_llm_ramp_rating_parses_score(self) -> None:
+        metric = RampUpTime.__new__(RampUpTime)
+        metric.grok = MagicMock()
+        metric.grok.llm.return_value = "Analysis...\nFINAL SCORE: 0.8"
+
+        score = metric._llm_ramp_rating("Helpful instructions")
+
+        self.assertAlmostEqual(score, 0.8)
+        metric.grok.llm.assert_called_once()
+        prompt = metric.grok.llm.call_args.args[0]
+        self.assertIn("Model card snippet", prompt)
+
+    def test_llm_ramp_rating_handles_failures(self) -> None:
+        metric = RampUpTime.__new__(RampUpTime)
+        metric.grok = MagicMock()
+        metric.grok.llm.side_effect = RuntimeError("llm down")
+
+        with patch("src.Metrics.time.sleep"):
+            score = metric._llm_ramp_rating("Some text")
+
+        self.assertEqual(score, 0.5)
+        self.assertEqual(metric.grok.llm.call_count, LLM_MAX_ATTEMPTS)
+
+    def test_llm_ramp_rating_handles_parse_errors(self) -> None:
+        metric = RampUpTime.__new__(RampUpTime)
+        metric.grok = MagicMock()
+        metric.grok.llm.return_value = "score high"
+
+        with patch("src.Metrics.time.sleep"):
+            score = metric._llm_ramp_rating("Some text")
+
+        self.assertEqual(score, 0.5)
+        self.assertEqual(metric.grok.llm.call_count, LLM_MAX_ATTEMPTS)
+
+
+class TestBusFactorHelpers(unittest.TestCase):
+    def test_estimate_bus_factor_with_grok_clamps_values(self) -> None:
+        metric = BusFactorMetric(hf_client=MagicMock(), grok_client=MagicMock())
+        metric.grok.llm.return_value = "Large team.\nFINAL SCORE: 100"
+
+        eff_high = metric._estimate_bus_factor_with_grok(
+            model_id="org/model",
+            grok_client=metric.grok,
+        )
+        self.assertEqual(eff_high, 20.0)
+
+        metric.grok.llm.return_value = "Tiny team.\nFINAL SCORE: 0.1"
+        eff_low = metric._estimate_bus_factor_with_grok(
+            model_id="org/model",
+            grok_client=metric.grok,
+        )
+        self.assertEqual(eff_low, 0.5)
+
+    def test_estimate_bus_factor_with_grok_raises_on_failure(self) -> None:
+        metric = BusFactorMetric(hf_client=MagicMock(), grok_client=MagicMock())
+        metric.grok.llm.side_effect = RuntimeError("grok down")
+
+        with patch("src.Metrics.time.sleep"):
+            with self.assertRaises(RuntimeError):
+                metric._estimate_bus_factor_with_grok(
+                    model_id="org/model",
+                    grok_client=metric.grok,
+                )
 
 
 if __name__ == "__main__":
