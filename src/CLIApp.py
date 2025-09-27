@@ -13,8 +13,6 @@ from src.Metrics import (AvailabilityMetric, BusFactorMetric, CodeQuality,
 from src.Parser import Parser
 
 logger = get_logger(__name__)
-from dotenv import load_dotenv
-#load_dotenv()  # Load keys from .env file
 
 
 def _validate_env_or_exit() -> None:
@@ -36,7 +34,7 @@ def _validate_env_or_exit() -> None:
 
     # Validate GitHub token
     if not gh_token:
-        fail("GITHUBg_TOKEN is empty or unset")
+        fail("GITHUB_TOKEN is empty or unset")
     # Heuristic token format check
     if not (len(gh_token) >= 8 and (gh_token.startswith("ghp_") or gh_token.startswith("github_") or "_" in gh_token)):
         fail("GITHUB_TOKEN format appears invalid")
