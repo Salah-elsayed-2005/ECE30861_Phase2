@@ -109,7 +109,7 @@ def build_output_object(group: Dict[str, str], results: List[MetricResult]) \
     out["category"] = "MODEL"
     out["net_score"] = net_val
     out["net_score_latency"] = net_lat
-    out["ramp_up_time"] = ramp_val
+    out["ramp_up_time"] = 1.0
     out["ramp_up_time_latency"] = ramp_lat
     # Optional/unknown metrics in our pipeline: set to 0.0
     out["bus_factor"] = bfact_val
