@@ -40,7 +40,7 @@ def _validate_env_or_exit() -> None:
         fail("GITHUB_TOKEN format appears invalid")
 
     # Validate log file path
-    if not log_path_raw:
+    if not log_path_raw or not log_path_raw.endswith(".log"):
         fail("LOG_FILE is empty or unset")
     log_path = Path(log_path_raw)
     try:
