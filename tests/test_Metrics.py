@@ -9,8 +9,10 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 from src.Metrics import (AvailabilityMetric, BusFactorMetric, CodeQuality,
-                         DatasetQuality, LicenseMetric, Metric, MetricResult,
-                         PerformanceClaimsMetric, RampUpTime, SizeMetric)
+                         DatasetQuality, GIT_MAX_REQUESTS,
+                         GIT_WINDOW_SECONDS, LicenseMetric, Metric,
+                         MetricResult, PerformanceClaimsMetric, RampUpTime,
+                         SizeMetric)
 
 
 class TestMetricResult(unittest.TestCase):
@@ -433,8 +435,11 @@ class TestBusFactorMetric(unittest.TestCase):
         score = metric.compute({"git_repo_path": "/tmp/repo"},
                                target_maintainers=5)
 
-        mock_git_client_cls.assert_called_once_with(max_requests=100,
-                                                    repo_path="/tmp/repo")
+        mock_git_client_cls.assert_called_once_with(
+            max_requests=GIT_MAX_REQUESTS,
+            repo_path="/tmp/repo",
+            window_seconds=GIT_WINDOW_SECONDS,
+        )
         mock_commit_counts.assert_called_once()
         self.assertAlmostEqual(score, 3.0 / 5.0)
 

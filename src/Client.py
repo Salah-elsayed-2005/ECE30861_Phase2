@@ -54,24 +54,48 @@ class Client(ABC):
 
     def request(self, *args: Any, **kwargs: Any) -> Any:
         """
-        Public entrypoint: check ``can_send()`` then delegate to ``_send()``.
+        Public entrypoint: honor the rate limit before delegating to
+        ``_send()``. When the rate limit is reached, the call blocks until a
+        new slot becomes available instead of raising immediately.
 
         Returns
         -------
         Any
             Whatever ``_send(...)`` returns.
-
-        Raises
-        ------
-        RuntimeError
-            If the rate limit is exceeded.
         """
-        if not self.can_send():
-            msg = "Rate limit exceeded: request not allowed right now."
-            logger.info("Rate limit hit for %s", self.__class__.__name__)
-            raise RuntimeError(msg)
-        logger.debug("Rate limit ok for %s", self.__class__.__name__)
+        while True:
+            if self.can_send():
+                logger.debug("Rate limit ok for %s", self.__class__.__name__)
+                break
+
+            delay = max(self._rate_limit_wait_time(), self._rate_limit_min_delay())
+            logger.info(
+                "Rate limit hit for %s; sleeping %.3fs",
+                self.__class__.__name__,
+                delay,
+            )
+            self._rate_limit_sleep(delay)
+
         return self._send(*args, **kwargs)
+
+    @staticmethod
+    def _rate_limit_min_delay() -> float:
+        """Return the minimum backoff to avoid busy-waiting."""
+        return 0.05
+
+    def _rate_limit_wait_time(self) -> float:
+        """
+        Compute how long to sleep before retrying after a rate limit hit.
+
+        Subclasses backed by a shared sliding window should override this to
+        return a value based on their internal state (e.g., time until the
+        oldest timestamp leaves the window).
+        """
+        return 1.0
+
+    @staticmethod
+    def _rate_limit_sleep(delay: float) -> None:
+        time.sleep(delay)
 
 
 class PurdueClient(Client):
@@ -137,6 +161,19 @@ class PurdueClient(Client):
                 PurdueClient.request_history.append(now)
                 return True
         return False
+
+    def _rate_limit_wait_time(self) -> float:
+        with PurdueClient._lock:
+            history = PurdueClient.request_history
+            if not history:
+                return self.window_seconds / max(self.max_requests, 1)
+            oldest = history[0]
+
+        now = time.monotonic()
+        wait = oldest + self.window_seconds - now
+        if wait <= 0:
+            return self.window_seconds / max(self.max_requests, 1)
+        return wait
 
     def _send(self, method: str, path: str, **kwargs: Any) -> Any:
         """
@@ -281,6 +318,19 @@ class HFClient(Client):
                 return True
         return False
 
+    def _rate_limit_wait_time(self) -> float:
+        with HFClient._lock:
+            history = HFClient.request_history
+            if not history:
+                return self.window_seconds / max(self.max_requests, 1)
+            oldest = history[0]
+
+        now = time.monotonic()
+        wait = oldest + self.window_seconds - now
+        if wait <= 0:
+            return self.window_seconds / max(self.max_requests, 1)
+        return wait
+
     def _send(self, method: str, path: str, **kwargs: Any) -> Any:
         """
         Perform an HTTP request to HF's API.
@@ -357,7 +407,7 @@ class GitClient(Client):
     def __init__(self,
                  max_requests: int,
                  repo_path: str = ".",
-                 window_seconds: float = 60.0) -> None:
+                 window_seconds: float = 30.0) -> None:
         super().__init__()
         self.max_requests = max_requests
         self.window_seconds = window_seconds
@@ -386,6 +436,19 @@ class GitClient(Client):
                 GitClient.request_history.append(now)
                 return True
         return False
+
+    def _rate_limit_wait_time(self) -> float:
+        with GitClient._lock:
+            history = GitClient.request_history
+            if not history:
+                return self.window_seconds / max(self.max_requests, 1)
+            oldest = history[0]
+
+        now = time.monotonic()
+        wait = oldest + self.window_seconds - now
+        if wait <= 0:
+            return self.window_seconds / max(self.max_requests, 1)
+        return wait
 
     def _send(self, *git_args: str) -> str:
         """

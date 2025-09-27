@@ -21,6 +21,16 @@ from src.utils import browse_hf_repo, injectHFBrowser
 logger = get_logger(__name__)
 
 
+# Rate limit configuration shared across metrics so that all callsites are
+# consistent and easy to tune in one place.
+PURDUE_MAX_REQUESTS = 40
+PURDUE_WINDOW_SECONDS = 30.0
+HF_MAX_REQUESTS = 120
+HF_WINDOW_SECONDS = 30.0
+GIT_MAX_REQUESTS = 40
+GIT_WINDOW_SECONDS = 30.0
+
+
 @dataclass(frozen=True)
 class MetricResult:
     """
@@ -93,8 +103,14 @@ class RampUpTime(Metric):
     key = "ramp_up_time"
 
     def __init__(self):
-        self.client = HFClient(max_requests=100)
-        self.grok = PurdueClient(max_requests=100)
+        self.client = HFClient(
+            max_requests=HF_MAX_REQUESTS,
+            window_seconds=HF_WINDOW_SECONDS,
+        )
+        self.grok = PurdueClient(
+            max_requests=PURDUE_MAX_REQUESTS,
+            window_seconds=PURDUE_WINDOW_SECONDS,
+        )
 
     def _extract_usage_section(self, text: str) -> str | None:
         """
@@ -288,8 +304,14 @@ class LicenseMetric(Metric):
     }
 
     def __init__(self):
-        self.hf_client = HFClient(max_requests=100)
-        self.grok_client = PurdueClient(max_requests=100)
+        self.hf_client = HFClient(
+            max_requests=HF_MAX_REQUESTS,
+            window_seconds=HF_WINDOW_SECONDS,
+        )
+        self.grok_client = PurdueClient(
+            max_requests=PURDUE_MAX_REQUESTS,
+            window_seconds=PURDUE_WINDOW_SECONDS,
+        )
 
     def compute(self, inputs: dict[str, Any], **kwargs) -> float:
         """
@@ -390,7 +412,10 @@ class SizeMetric(Metric):
     ]
 
     def __init__(self):
-        self.hf_client = HFClient(max_requests=100)
+        self.hf_client = HFClient(
+            max_requests=HF_MAX_REQUESTS,
+            window_seconds=HF_WINDOW_SECONDS,
+        )
 
     def extract_bits_from_saftensor(self,
                                     safeTensorDict: dict[str, int]) -> int:
@@ -531,7 +556,10 @@ class AvailabilityMetric(Metric):
     key = "availability_metric"
 
     def __init__(self) -> None:
-        self.grok = PurdueClient(max_requests=100)
+        self.grok = PurdueClient(
+            max_requests=PURDUE_MAX_REQUESTS,
+            window_seconds=PURDUE_WINDOW_SECONDS,
+        )
         self.last_details: dict[str, Any] = {}
 
     def _llm_detect_availability(self, page_text: str) \
@@ -720,8 +748,14 @@ class PerformanceClaimsMetric(Metric):
     key = "performance_claims"
 
     def __init__(self):
-        self.hf_client = HFClient(max_requests=100)
-        self.grok_client = PurdueClient(max_requests=100)
+        self.hf_client = HFClient(
+            max_requests=HF_MAX_REQUESTS,
+            window_seconds=HF_WINDOW_SECONDS,
+        )
+        self.grok_client = PurdueClient(
+            max_requests=PURDUE_MAX_REQUESTS,
+            window_seconds=PURDUE_WINDOW_SECONDS,
+        )
 
     def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
         """
@@ -840,7 +874,10 @@ class DatasetQuality(Metric):
     key = "dataset_quality"
 
     def __init__(self, hf_client: Optional[HFClient] = None) -> None:
-        self.hf_client = HFClient(max_requests=100)
+        self.hf_client = hf_client or HFClient(
+            max_requests=HF_MAX_REQUESTS,
+            window_seconds=HF_WINDOW_SECONDS,
+        )
         self.last_details: dict[str, Any] = {}
 
     def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
@@ -1241,8 +1278,14 @@ class CodeQuality(Metric):
         hf_client: Optional[HFClient] = None,
         grok_client: Optional[PurdueClient] = None,
     ) -> None:
-        self.hf_client = hf_client or HFClient(max_requests=100)
-        self.grok = grok_client or PurdueClient(max_requests=100)
+        self.hf_client = hf_client or HFClient(
+            max_requests=HF_MAX_REQUESTS,
+            window_seconds=HF_WINDOW_SECONDS,
+        )
+        self.grok = grok_client or PurdueClient(
+            max_requests=PURDUE_MAX_REQUESTS,
+            window_seconds=PURDUE_WINDOW_SECONDS,
+        )
         self.last_details: dict[str, Any] = {}
 
     def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
@@ -1434,7 +1477,11 @@ class CodeQuality(Metric):
 
         candidates: list[str] = []
         try:
-            git_client = GitClient(max_requests=100, repo_path=str(root))
+            git_client = GitClient(
+                max_requests=GIT_MAX_REQUESTS,
+                repo_path=str(root),
+                window_seconds=GIT_WINDOW_SECONDS,
+            )
             candidates = [
                 path
                 for path in git_client.list_files()
@@ -1859,9 +1906,13 @@ class BusFactorMetric(Metric):
         grok_client: Optional[PurdueClient] = None,
     ) -> None:
         self.hf_client = hf_client or HFClient(
-            max_requests=10)
+            max_requests=HF_MAX_REQUESTS,
+            window_seconds=HF_WINDOW_SECONDS,
+        )
         self.grok = grok_client or PurdueClient(
-            max_requests=100)
+            max_requests=PURDUE_MAX_REQUESTS,
+            window_seconds=PURDUE_WINDOW_SECONDS,
+        )
 
     # ---------------- helpers ----------------
 
@@ -2116,7 +2167,11 @@ class BusFactorMetric(Metric):
         )
         if isinstance(git_path, str) and git_path.strip():
             try:
-                git_client = GitClient(max_requests=100, repo_path=git_path)
+                git_client = GitClient(
+                    max_requests=GIT_MAX_REQUESTS,
+                    repo_path=git_path,
+                    window_seconds=GIT_WINDOW_SECONDS,
+                )
                 gh_counts = self.github_commit_counts(
                     git_client, include_merges=False
                 )
@@ -2150,7 +2205,9 @@ class BusFactorMetric(Metric):
                         timeout=60,
                     )
                     git_client = GitClient(
-                        max_requests=20, repo_path=str(dest)
+                        max_requests=GIT_MAX_REQUESTS,
+                        repo_path=str(dest),
+                        window_seconds=GIT_WINDOW_SECONDS,
                     )
                     gh_counts = self.github_commit_counts(
                         git_client, include_merges=False

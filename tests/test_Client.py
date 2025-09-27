@@ -36,8 +36,13 @@ class TestRateLimiting(unittest.TestCase):
         self.client.request()  # This should be fine (n_reqs: 3 -> 2)
         self.client.request()  # This should be fine (n_reqs: 2 -> 1)
         self.client.request()  # This should be fine (n_reqs: 1 -> 0)
-        with self.assertRaises(Exception, msg="Limit should be hit"):
-            self.client.request()  # This should error (n_reqs: 1 -> 0)
+
+        with patch.object(self.client, "can_send",
+                          side_effect=[False, True]) as mock_can:
+            with patch("src.Client.time.sleep") as mock_sleep:
+                self.client.request()  # Should wait then succeed
+                self.assertEqual(mock_can.call_count, 2)
+                mock_sleep.assert_called_once()
 
 
 '''
