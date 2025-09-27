@@ -14,7 +14,7 @@ from src.Parser import Parser
 
 logger = get_logger(__name__)
 from dotenv import load_dotenv
-load_dotenv()  # Load keys from .env file
+#load_dotenv()  # Load keys from .env file
 
 
 def _validate_env_or_exit() -> None:

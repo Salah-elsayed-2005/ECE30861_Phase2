@@ -364,10 +364,10 @@ class SizeMetric(Metric):
     key = "size_metric"
     device_profiles: dict[str, tuple[float, float]] = {
         # (memory in GB, relative throughput multiplier)
-        "raspberry_pi": (4.0, 0.05),
-        "jetson_nano": (8.0, 0.85),
-        "desktop_pc": (32.0, 1.0),
-        "aws_server": (128.0, 1.0),
+        "raspberry_pi": (4.0, 0.01),
+        "jetson_nano": (4.0, 0.05),
+        "desktop_pc": (32.0, 0.4),
+        "aws_server": (128.0, 0.6),
     }
     device_capacity_bits: dict[str, int] = {
         name: int(memory_gb * 1024**3 * 8 * perf_multiplier)
