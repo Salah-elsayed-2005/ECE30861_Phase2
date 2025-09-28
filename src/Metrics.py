@@ -1878,7 +1878,7 @@ class CodeQuality(Metric):
             llm_score = max(llm_scores)
             # Heuristic scores are currently advisory; only the LLM output
             # feeds the final score, but we keep the numbers for telemetry.
-            score = (0*lint_score + 0*typing_score + 1*llm_score)
+            score = (0.05*lint_score + 0.05*typing_score + 0.9*llm_score)
             score = max(0.0, min(1.0, score))
 
             self.last_details = {

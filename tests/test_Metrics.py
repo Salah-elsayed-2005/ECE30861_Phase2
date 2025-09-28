@@ -853,7 +853,7 @@ class TestDatasetQualityMetric(unittest.TestCase):
 class TestCodeQualityMetric(unittest.TestCase):
     """Test the CodeQuality metric using controlled doubles."""
 
-    def test_compute_returns_average_of_subscores(self) -> None:
+    def test_compute_uses_weighted_mix_of_subscores(self) -> None:
         metric = CodeQuality(hf_client=MagicMock(), grok_client=MagicMock())
 
         with ExitStack() as stack:
@@ -875,7 +875,8 @@ class TestCodeQualityMetric(unittest.TestCase):
             )
             score = metric.compute({})
 
-        self.assertAlmostEqual(score, 0.3)
+        expected = (0.05 * 0.9) + (0.05 * 0.6) + (0.9 * 0.3)
+        self.assertAlmostEqual(score, expected)
         self.assertEqual(
             metric.last_details,
             {

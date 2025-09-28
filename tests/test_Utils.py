@@ -4,7 +4,7 @@ from unittest.mock import ANY, MagicMock, patch
 import requests
 
 from src.Client import HFClient
-from src.utils import browse_hf_repo, injectHFBrowser
+from src.utils import _normalize_hf_text, browse_hf_repo, injectHFBrowser
 
 
 class TestBrowseHFRepo(unittest.TestCase):
@@ -114,6 +114,15 @@ class TestInjectHFBrowser(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             injectHFBrowser("https://huggingface.co/owner/broken")
+
+
+class TestNormalizeHFText(unittest.TestCase):
+    def test_collapses_extra_blank_lines_and_trailing_space(self) -> None:
+        raw = "Line 1  \r\n\r\n\r\nLine 2   \n\n\n  "
+        self.assertEqual(_normalize_hf_text(raw), "Line 1\n\nLine 2")
+
+    def test_handles_empty_string(self) -> None:
+        self.assertEqual(_normalize_hf_text(""), "")
 
 
 if __name__ == "__main__":
