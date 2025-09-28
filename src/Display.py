@@ -99,7 +99,7 @@ def build_output_object(group: Dict[str, str], results: List[MetricResult]) \
         0.1 * _score_mean(bfact_val),
     ]
     net_val = sum(components)
-    net_lat = max(ramp_lat,
+    net_lat = sum(ramp_lat,
                   lic_lat,
                   avail_lat,
                   size_lat,
