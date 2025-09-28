@@ -6,22 +6,22 @@ import ast
 import math
 import re
 import subprocess
+import sys
 import tempfile
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import shorten
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, TypeVar
+from typing import (Any, Callable, Iterable, Mapping, Optional, Sequence,
+                    TypeVar)
 from urllib.parse import quote, urlparse
+
+import requests
 
 from src.Client import GitClient, HFClient, PurdueClient
 from src.logging_utils import get_logger
 from src.utils import browse_hf_repo, injectHFBrowser
-
-import requests
-
-import sys
 
 logger = get_logger(__name__)
 
@@ -64,6 +64,8 @@ def _call_llm_with_retry(
             raw = call()
             return parser(raw)
         except Exception as exc:
+            # Swallow and retry transient LLM failures so the caller only
+            # sees an error after we've exhausted the configured budget.
             last_error = exc
             logger.info(
                 "%s attempt %d/%d failed: %s",
@@ -85,8 +87,10 @@ def _parse_numeric_response(
     *,
     allowed: Optional[Sequence[float]] = None,
 ) -> float:
-    """Extract a numeric value from the LLM response using the FINAL SCORE tag."""
+    """Extract a numeric score using the ``FINAL SCORE`` tag from the LLM."""
 
+    # Normalise the response to text so regex parsing works across return
+    # types coming from the LLM client.
     text = str(raw or "").strip()
     match = LLM_SCORE_PATTERN.search(text)
     if not match:
@@ -241,12 +245,17 @@ class RampUpTime(Metric):
         logger.info("Computing ramp-up score for %s", url)
         model_id = DatasetQuality._model_id_from_url(url)
         fetch_failed = False
-        # Fetch the full page text using an HTTP scrape; on failure, fall back
+        # Prefer the rendered page to capture tabs/collapsed sections; if
+        # scraping fails, fall back to the raw README via the HF API.
         try:
             full_page_text = injectHFBrowser(url)
         except Exception:
             fetch_failed = True
-            logger.info("Rendered page fetch failed for %s", url, exc_info=True)
+            logger.info(
+                "Rendered page fetch failed for %s",
+                url,
+                exc_info=True,
+            )
             full_page_text = ""
             if model_id:
                 try:
@@ -283,9 +292,12 @@ class RampUpTime(Metric):
                 "inference",
             )
             if any(kw in lowered for kw in keywords) or "```" in lowered:
+                # If the LLM could not isolate usage guidance, fall back to a
+                # simple keyword scan so we still reward basic documentation.
                 usage_available = True
                 logger.debug(
-                    "Heuristic detected usage keywords for %s despite empty extraction",
+                    "Heuristic detected usage keywords for %s despite empty "
+                    "extraction",
                     url,
                 )
         if usage_available:
@@ -295,6 +307,8 @@ class RampUpTime(Metric):
         else:
             usage_score = 0.0
 
+        # Sample the Grok score a few times because responses can be noisy;
+        # keep the best outcome to stabilise the metric.
         llm_scores = [
             self._llm_ramp_rating(full_page_text)
             for _ in range(RAMP_UP_LLM_ATTEMPTS)
@@ -319,6 +333,8 @@ class RampUpTime(Metric):
             logger.debug("Empty model card text; defaulting LLM ramp score")
             return 0.5
 
+        # Restrict context to remain under typical LLM limits while keeping
+        # enough substance for a meaningful judgement.
         context = shorten(page_text, width=4000, placeholder="...")
         prompt = (
             "You are evaluating how quickly a developer can start using a "
@@ -326,7 +342,8 @@ class RampUpTime(Metric):
             "Think step-by-step about clarity of setup steps, code examples, "
             "dependencies, and potential pitfalls. After your reasoning, "
             "write a line in the format 'FINAL SCORE: <number>' where the "
-            "number is between 0 and 1 (1 = very fast ramp-up, 0 = very hard).\n\n"
+            "number is between 0 and 1 "
+            "(1 = very fast ramp-up, 0 = very hard).\n\n"
             f"Model card snippet:\n{context}"
         )
 
@@ -346,16 +363,20 @@ class RampUpTime(Metric):
                 description="Ramp-up LLM score",
             )
         except Exception:
+            # Keep the metric resilient: log the failure and return a neutral
+            # midpoint rather than erroring out the caller.
             sys.stderr.write("Ramp-up LLM scoring failed; defaulting to 0.5")
             sys.stderr.write(str(Exception))
 
-            logger.info("Ramp-up LLM scoring failed; defaulting to 0.5",
-                        exc_info=True)
+            logger.info(
+                "Ramp-up LLM scoring failed; defaulting to 0.5",
+                exc_info=True,
+            )
             return 0.5
 
 
 class LicenseMetric(Metric):
-    """Determine permissiveness of the model license with graceful fallbacks."""
+    """Score license permissiveness while maintaining resilient fallbacks."""
 
     name = "License Permissiveness"
     key = "license_metric"
@@ -556,9 +577,15 @@ class LicenseMetric(Metric):
             model_info = self.hf_client.request("GET",
                                                 f"/api/models/{model_id}")
         except Exception:
-            logger.info("HF model lookup failed for %s", model_id, exc_info=True)
+            logger.info(
+                "HF model lookup failed for %s",
+                model_id,
+                exc_info=True,
+            )
             model_info = {}
         candidates = self._collect_license_candidates(model_info)
+        # Walk the potential license declarations in priority order; the first
+        # recognised slug wins so behaviour is deterministic.
         logger.debug("License candidates for %s: %s", model_id, candidates)
         for candidate in candidates:
             normalized = self._normalize_license_name(candidate)
@@ -573,7 +600,10 @@ class LicenseMetric(Metric):
             logger.info("License score for %s: %.2f", model_id, score)
             return score
 
-        logger.info("License unknown for %s; returning neutral score", model_id)
+        logger.info(
+            "License unknown for %s; returning neutral score",
+            model_id,
+        )
         return 0.5
 
     def _collect_license_candidates(self, payload: Any) -> list[Any]:
@@ -581,6 +611,8 @@ class LicenseMetric(Metric):
             return []
 
         candidates: list[Any] = []
+        # Card metadata often mirrors top-level fields but we inspect both to
+        # maximise coverage across author formatting styles.
         card = payload.get("cardData")
         if isinstance(card, Mapping):
             for key in ("license", "license_name", "licenses"):
@@ -628,8 +660,11 @@ class LicenseMetric(Metric):
                 recursive=False,
             )
         except Exception:
-            logger.debug("Failed to list repo files for %s", model_id,
-                         exc_info=True)
+            logger.debug(
+                "Failed to list repo files for %s",
+                model_id,
+                exc_info=True,
+            )
             return None
 
         for path, _size in files:
@@ -642,9 +677,14 @@ class LicenseMetric(Metric):
                     )
                 except Exception:
                     continue
-                text = content.decode("utf-8", errors="ignore") \
-                    if isinstance(content, (bytes, bytearray)) else str(content)
+                text = (
+                    content.decode("utf-8", errors="ignore")
+                    if isinstance(content, (bytes, bytearray))
+                    else str(content)
+                )
                 lower = text.lower()
+                # Search for both explicit phrases and loose aliases so that
+                # lightly modified license stubs still map to a known score.
                 for phrase, slug in self.license_text_hints:
                     if phrase in lower:
                         return slug
@@ -775,8 +815,10 @@ class SizeMetric(Metric):
 
         bits = self._bits_from_hf_metadata(model_id, model_info)
         if bits is None:
+            # Fall back to repo listings when metadata omits sizes.
             bits = self._bits_from_repo_listing(model_id)
         if bits is None:
+            # Last resort: probe common filenames via HEAD requests.
             bits = self._bits_via_head_requests(inputs['model_url'])
 
         # Translate the bit-count into per-device deployability scores by
@@ -808,8 +850,11 @@ class SizeMetric(Metric):
         logger.info("Size scores for %s: %s", model_id, scores)
         return scores
 
-    def _bits_from_hf_metadata(self, model_id: str,
-                                payload: Any) -> Optional[int]:
+    def _bits_from_hf_metadata(
+        self,
+        model_id: str,
+        payload: Any,
+    ) -> Optional[int]:
         if not isinstance(payload, Mapping):
             return None
 
@@ -817,34 +862,60 @@ class SizeMetric(Metric):
         if isinstance(safetensors, Mapping):
             params = safetensors.get("parameters")
             if isinstance(params, Mapping) and params:
-                bits = self.extract_bits_from_saftensor(params)
-                logger.debug("Using safetensors metadata for %s -> %s bits",
-                             model_id, bits)
-                return bits
+                numeric_params: dict[str, int] = {}
+                for name, raw_value in params.items():
+                    if not isinstance(name, str):
+                        continue
+                    if isinstance(raw_value, (int, float)):
+                        numeric_params[name] = int(raw_value)
+                if numeric_params:
+                    # Prefer precise safetensor metadata when available.
+                    bits = self.extract_bits_from_saftensor(numeric_params)
+                    logger.debug(
+                        "Using safetensors metadata for %s -> %s bits",
+                        model_id,
+                        bits,
+                    )
+                    return bits
 
         siblings = payload.get("siblings")
         if isinstance(siblings, Iterable):
-            sizes = [
-                entry.get("size")
-                for entry in siblings
-                if isinstance(entry, Mapping)
-                and isinstance(entry.get("rfilename"), str)
-                and any(entry["rfilename"].endswith(ext)
-                        for ext in SizeMetric.commonModelFileEndings)
-            ]
-            bits = self._bits_from_sizes(sizes)
-            if bits:
-                logger.debug("Estimated bits for %s from siblings metadata: %s",
-                             model_id, bits)
-                return bits
+            sizes = []
+            for entry in siblings:
+                if not isinstance(entry, Mapping):
+                    continue
+                filename = entry.get("rfilename")
+                if not isinstance(filename, str):
+                    continue
+                if any(
+                    filename.endswith(ext)
+                    for ext in SizeMetric.commonModelFileEndings
+                ):
+                    sizes.append(entry.get("size"))
+            estimated_bits = self._bits_from_sizes(sizes)
+            if estimated_bits is not None:
+                # Summaries often include param files but omit topology;
+                # averaging their sizes gives a reasonable footprint.
+                logger.debug(
+                    "Estimated bits for %s from siblings metadata: %s",
+                    model_id,
+                    estimated_bits,
+                )
+                return estimated_bits
 
         card = payload.get("cardData")
         if isinstance(card, Mapping):
-            size_entry = card.get("model_size") or card.get("model_size_in_bytes")
+            size_entry = (
+                card.get("model_size")
+                or card.get("model_size_in_bytes")
+            )
             if isinstance(size_entry, (int, float)) and size_entry > 0:
                 bits = int(float(size_entry) * 8)
-                logger.debug("Using cardData size for %s -> %s bits",
-                             model_id, bits)
+                logger.debug(
+                    "Using cardData size for %s -> %s bits",
+                    model_id,
+                    bits,
+                )
                 return bits
             if isinstance(size_entry, str):
                 match = re.search(r"(\d+(?:\.\d+)?)\s*([kmgt]?b)",
@@ -860,8 +931,11 @@ class SizeMetric(Metric):
                         "tb": 1024**4,
                     }.get(unit, 1)
                     bits = int(value * multiplier * 8)
-                    logger.debug("Parsed textual model size for %s -> %s bits",
-                                 model_id, bits)
+                    logger.debug(
+                        "Parsed textual model size for %s -> %s bits",
+                        model_id,
+                        bits,
+                    )
                     return bits
         return None
 
@@ -875,20 +949,32 @@ class SizeMetric(Metric):
                 recursive=True,
             )
         except Exception:
-            logger.debug("Failed to browse repo for model size %s",
-                         model_id, exc_info=True)
+            logger.debug(
+                "Failed to browse repo for model size %s",
+                model_id,
+                exc_info=True,
+            )
             return None
 
         sizes = [
             size
             for path, size in files
             if isinstance(size, (int, float))
-            and any(path.endswith(ext) for ext in SizeMetric.commonModelFileEndings)
+            and any(
+                path.endswith(ext)
+                for ext in SizeMetric.commonModelFileEndings
+            )
         ]
         bits = self._bits_from_sizes(sizes)
         if bits:
-            logger.debug("Estimated bits for %s from %d repo files: %s",
-                         model_id, len(sizes), bits)
+            # Repo listings include raw byte sizes which we convert to bits to
+            # stay consistent with other estimators.
+            logger.debug(
+                "Estimated bits for %s from %d repo files: %s",
+                model_id,
+                len(sizes),
+                bits,
+            )
         return bits
 
     def _bits_via_head_requests(self, model_url: str) -> Optional[int]:
@@ -908,13 +994,24 @@ class SizeMetric(Metric):
                     continue
         bits = self._bits_from_sizes(sizes)
         if bits:
-            logger.debug("Estimated bits for %s via HEAD requests: %s",
-                         model_url, bits)
+            # HEAD requests give us approximate binary sizes without
+            # downloading large artifacts.
+            logger.debug(
+                "Estimated bits for %s via HEAD requests: %s",
+                model_url,
+                bits,
+            )
         return bits
 
     @staticmethod
     def _bits_from_sizes(sizes: Iterable[Any]) -> Optional[int]:
-        bytes_values = [int(size) for size in sizes if isinstance(size, (int, float)) and size > 0]
+        # Average multiple sources to smooth out per-file variations before
+        # converting to bits.
+        bytes_values = [
+            int(size)
+            for size in sizes
+            if isinstance(size, (int, float)) and size > 0
+        ]
         if not bytes_values:
             return None
         avg_bytes = sum(bytes_values) / len(bytes_values)
@@ -926,7 +1023,8 @@ class AvailabilityMetric(Metric):
     Metric that checks whether a model has an associated dataset and codebase
     available. Awards 0.5 for each item found via the model card.
 
-    This metric retrieves the rendered model page text (via ``injectHFBrowser``)
+    This metric retrieves the rendered model page text
+    (via ``injectHFBrowser``)
     and uses a Grok LLM to identify mentions/links to an available dataset and
     an available code repository.
     """
@@ -1105,6 +1203,8 @@ class AvailabilityMetric(Metric):
         code_ev = explicit_git if has_code else ""
 
         if not (has_dataset and has_code):
+            # When explicit links are absent, inspect the rendered card via
+            # Grok to surface implicit references or hyperlinks.
             try:
                 page_text = injectHFBrowser(model_url)
             except Exception:
@@ -1124,7 +1224,6 @@ class AvailabilityMetric(Metric):
             "dataset_evidence": dataset_ev,
             "codebase_evidence": code_ev,
         }
-        # print(self.last_details)
         score = (0.5 if has_dataset else 0.0) + (0.5 if has_code else 0.0)
         logger.info("Availability score for %s: %.2f", model_url, score)
         return score
@@ -1201,24 +1300,35 @@ class PerformanceClaimsMetric(Metric):
                 rendered = injectHFBrowser(model_url)
                 card_data = rendered.splitlines()
             except Exception:
-                logger.info("Rendered page fetch failed for %s", model_id,
-                            exc_info=True)
+                logger.info(
+                    "Rendered page fetch failed for %s",
+                    model_id,
+                    exc_info=True,
+                )
                 card_data = []
             source = "rendered_page"
-        logger.debug("Performance claims text source=%s lines=%d for %s",
-                     source,
-                     len(card_data),
-                     model_id)
+        logger.debug(
+            "Performance claims text source=%s lines=%d for %s",
+            source,
+            len(card_data),
+            model_id,
+        )
 
         if not card_data:
-            logger.info("Empty performance evidence for %s; returning zero score",
-                        model_id)
+            logger.info(
+                "Empty performance evidence for %s; returning zero score",
+                model_id,
+            )
             return 0.0
 
+        # Quick keyword/number scan catches obvious tables or metric call-outs
+        # without paying the LLM cost.
         heuristic_hit = self._detect_benchmark_claims(card_data)
         if heuristic_hit:
-            logger.info("Performance claims detected heuristically for %s",
-                        model_id)
+            logger.info(
+                "Performance claims detected heuristically for %s",
+                model_id,
+            )
             return 1.0
 
         # Prompt the LLM to give score
@@ -1226,12 +1336,16 @@ class PerformanceClaimsMetric(Metric):
             "You will assess whether the provided README snippets include "
             "performance claims backed by benchmark results. Think through "
             "the evidence step-by-step. After your reasoning, output a line "
-            "'FINAL SCORE: <value>' where the value is 1.0 if benchmark-backed "
+            "'FINAL SCORE: <value>' where the value is 1.0 if benchmark-"
+            "backed "
             "claims exist, otherwise 0.0. Snippets:\n"
             f"{''.join(card_data)}"
         )
-        logger.info("Querying LLM for performance claims evaluation on %s",
-                    model_id)
+        logger.info(
+            "Querying LLM for performance claims evaluation on %s",
+            model_id,
+        )
+
         def call() -> Any:
             return self.grok_client.llm(prompt)
 
@@ -1245,6 +1359,8 @@ class PerformanceClaimsMetric(Metric):
                 description="Performance claims LLM",
             )
         except Exception:
+            # Treat LLM failures as neutral and rely on the heuristic outcome
+            # so the metric remains deterministic.
             logger.info(
                 "Performance claims LLM failed after retries",
                 exc_info=True,
@@ -1266,15 +1382,24 @@ class PerformanceClaimsMetric(Metric):
             if any(keyword in lower for keyword in self.performance_keywords):
                 if re.search(r"\d+(?:\.\d+)?\s*%", lower):
                     return True
-                if re.search(r"\d+(?:\.\d+)?\s*(?:f1|bleu|rouge|acc|auc|wer)",
-                              lower):
+                if re.search(
+                    r"\d+(?:\.\d+)?\s*(?:f1|bleu|rouge|acc|auc|wer)",
+                    lower,
+                ):
                     return True
-            if '|' in line and re.search(r"\d", lower) and any(
-                    kw in lower for kw in ("acc", "f1", "bleu", "score", "precision")):
+            if (
+                '|' in line
+                and re.search(r"\d", lower)
+                and any(
+                    kw in lower
+                    for kw in ("acc", "f1", "bleu", "score", "precision")
+                )
+            ):
                 return True
             if any("benchmark" in text for text in window) and re.search(
-                    r"\d+(?:\.\d+)?\s*%",
-                    " ".join(window)):
+                r"\d+(?:\.\d+)?\s*%",
+                " ".join(window),
+            ):
                 return True
         return False
 
@@ -1331,14 +1456,27 @@ class DatasetQuality(Metric):
         try:
             use_count = self.count_models_for_dataset(dataset_id)
         except Exception:
-            logger.info("Dataset quality: failed to count models for %s",
-                        dataset_id, exc_info=True)
+            logger.info(
+                "Dataset quality: failed to count models for %s",
+                dataset_id,
+                exc_info=True,
+            )
             use_count = 0
-        logger.debug("Dataset %s likes=%s use_count=%d",
-                     dataset_id, likes, use_count)
+        logger.debug(
+            "Dataset %s likes=%s use_count=%d",
+            dataset_id,
+            likes,
+            use_count,
+        )
 
         # Step 3: convert engagement numbers into bounded scores
-        likes_score = self._squash_score(likes, scale=250) if likes is not None else 0.0
+        # Likes skew higher than reuse counts, so we weight reuse more heavily
+        # to reward datasets that underpin many downstream models.
+        likes_score = (
+            self._squash_score(likes, scale=250)
+            if likes is not None
+            else 0.0
+        )
         use_score = self._squash_score(use_count, scale=40)
 
         score = (0.6 * use_score) + (0.4 * likes_score)
@@ -1731,11 +1869,15 @@ class CodeQuality(Metric):
         if code_files:
             lint_score = self._lint_score(code_files)
             typing_score = self._typing_score(code_files)
+            # LLM assessments can vary, so sample a few times and keep the
+            # strongest showing to approximate a human reviewer.
             llm_scores = [
                 self._llm_code_rating(code_files)
                 for _ in range(CODE_QUALITY_LLM_ATTEMPTS)
             ]
             llm_score = max(llm_scores)
+            # Heuristic scores are currently advisory; only the LLM output
+            # feeds the final score, but we keep the numbers for telemetry.
             score = (0*lint_score + 0*typing_score + 1*llm_score)
             score = max(0.0, min(1.0, score))
 
@@ -1755,6 +1897,8 @@ class CodeQuality(Metric):
         model_url = inputs.get("model_url")
         if not card_text and isinstance(model_url, str):
             card_text = self._model_card_text(model_url)
+        # No code: fall back to evaluating the model card itself for quality
+        # signals so the metric still returns a bounded value.
         fallback_score = self._llm_card_rating(card_text)
         self.last_details = {
             "origin": "model_card",
@@ -1794,6 +1938,8 @@ class CodeQuality(Metric):
         if isinstance(git_url, str):
             logger.debug("Attempting to load code from explicit git_url %s",
                          git_url)
+            # Honour explicit user-supplied repositories before consulting the
+            # model card for GitHub hints.
             files = self._load_from_github(git_url)
             if files:
                 logger.debug("Loaded %d file(s) from %s", len(files), git_url)
@@ -1995,6 +2141,8 @@ class CodeQuality(Metric):
                 total += 1
                 failure = False
 
+                # Penalise common readability issues; keep checks cheap so we
+                # can run them across many repos without shelling out to tools.
                 if len(stripped) > 100:
                     failure = True
                 if stripped.rstrip() != stripped:
@@ -2048,6 +2196,8 @@ class CodeQuality(Metric):
             for node in ast.walk(tree):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     total_funcs += 1
+                    # Require full annotations rather than partial hints so
+                    # the score reflects comprehensive typing coverage.
                     if self._function_is_typed(node):
                         typed_funcs += 1
 
@@ -2528,7 +2678,8 @@ class BusFactorMetric(Metric):
             "- Individual/small teams: ~1-3\n"
             "- Well-known OSS projects: ~3-10\n"
             "- Academic institutions: ~2-5\n\n"
-            "Explain your reasoning briefly, then output 'FINAL SCORE: <number>' "
+            "Explain your reasoning briefly, then output "
+            "'FINAL SCORE: <number>' "
             "with the estimated effective maintainer count."
         )
 
@@ -2553,7 +2704,11 @@ class BusFactorMetric(Metric):
                 description="Bus factor LLM estimate",
             )
         except Exception as e:
-            logger.info("Grok estimation failed for %s", model_id, exc_info=True)
+            logger.info(
+                "Grok estimation failed for %s",
+                model_id,
+                exc_info=True,
+            )
             raise RuntimeError(f"Grok estimation failed: {e}") from e
 
     def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
@@ -2585,6 +2740,9 @@ class BusFactorMetric(Metric):
         # Prefer injected clients; fall back to constructor defaults
         hf = self.hf_client
 
+        # Work down the decision tree from most reliable contributor data to
+        # progressively noisier estimates so we always return a score.
+
         # ---------------------------
         # 1) GITHUB — local path
         # ---------------------------
@@ -2594,6 +2752,8 @@ class BusFactorMetric(Metric):
         )
         if isinstance(git_path, str) and git_path.strip():
             try:
+                # A checked-out repo lets us run git analytics without extra
+                # network cost.
                 git_client = GitClient(
                     max_requests=GIT_MAX_REQUESTS,
                     repo_path=git_path,
@@ -2624,6 +2784,8 @@ class BusFactorMetric(Metric):
                 with tempfile.TemporaryDirectory(prefix="bf-") as tmp:
                     dest = Path(tmp) / "repo"
                     logger.debug("Cloning %s into %s", git_url, dest)
+                    # Shallow clone is enough to derive author counts while
+                    # keeping runtime manageable.
                     subprocess.run(
                         ["git", "clone", "--depth", "100", git_url, str(dest)],
                         check=True,
@@ -2661,6 +2823,8 @@ class BusFactorMetric(Metric):
             tried: list[tuple[str, int]] = []
             for br in (kwargs.get("branch", "main"), "master"):
                 try:
+                    # HF commits API provides lightweight author metadata for
+                    # hosted repos; iterate branches to cover both defaults.
                     commit_data = self._fetch_hf_commits(
                         client=hf,
                         model_id=model_id,
@@ -2698,6 +2862,8 @@ class BusFactorMetric(Metric):
                 )
                 logger.info("Falling back to Grok estimate for %s",
                             model_id_for_grok)
+                # Last-resort: ask the LLM to approximate maintainer count
+                # when we have zero direct commit signals.
                 eff = self._estimate_bus_factor_with_grok(
                     model_id=model_id_for_grok,
                     grok_client=self.grok,
@@ -2707,6 +2873,7 @@ class BusFactorMetric(Metric):
                             exc_info=True)
                 eff = 2.0
         else:
+            # Without Grok, adhere to the documented constant fallback.
             logger.info("No Grok client available; using default bus factor")
             eff = 2.0
 

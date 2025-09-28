@@ -17,8 +17,8 @@ class TestCLIApp(unittest.TestCase):
         logging.shutdown()
 
     def _reload_modules(self) -> None:
-        import src.logging_utils as logging_utils
         import src.CLIApp as cli_app
+        import src.logging_utils as logging_utils
         importlib.reload(logging_utils)
         importlib.reload(cli_app)
         self.cli_app = cli_app

@@ -36,7 +36,14 @@ def _validate_env_or_exit() -> None:
     if not gh_token:
         fail("GITHUB_TOKEN is empty or unset")
     # Heuristic token format check
-    if not (len(gh_token) >= 8 and (gh_token.startswith("ghp_") or gh_token.startswith("github_") or "_" in gh_token)):
+    if not (
+        len(gh_token) >= 8
+        and (
+            gh_token.startswith("ghp_")
+            or gh_token.startswith("github_")
+            or "_" in gh_token
+        )
+    ):
         fail("GITHUB_TOKEN format appears invalid")
 
     # Validate log file path
@@ -45,7 +52,7 @@ def _validate_env_or_exit() -> None:
     log_path = Path(log_path_raw)
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, "a", encoding="utf-8") as _f:
+        with open(log_path, "a", encoding="utf-8"):
             pass
     except Exception as e:
         fail(f"LOG_FILE is not writable: {e}")

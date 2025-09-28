@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from src.Display import (_extract_model_name, _get_value_latency,
-                          build_output_object, print_results)
+                         build_output_object, print_results)
 from src.Metrics import MetricResult
 
 
@@ -50,7 +50,8 @@ class TestDisplayHelpers(unittest.TestCase):
             [0.8, 0.9, size_avg, 0.7, 0.6, 0.5, 0.4, 0.3]
         ) / 8
         self.assertAlmostEqual(out["net_score"], expected_net)
-        self.assertEqual(out["net_score_latency"], 10 + 5 + 8 + 4 + 6 + 7 + 9 + 3)
+        expected_latency = 10 + 5 + 8 + 4 + 6 + 7 + 9 + 3
+        self.assertEqual(out["net_score_latency"], expected_latency)
         self.assertEqual(out["ramp_up_time"], 0.8)
         self.assertEqual(out["size_score"]["jetson_nano"], 0.5)
 

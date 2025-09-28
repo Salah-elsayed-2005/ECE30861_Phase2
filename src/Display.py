@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Mapping
 from urllib.parse import urlparse
 
 from src.logging_utils import get_logger
@@ -28,38 +28,42 @@ def _results_by_key(results: Iterable[MetricResult]) \
     return {r.key: r for r in results}
 
 
-def _get_value_latency(res_map: Dict[str, MetricResult], key: str) \
-                       -> tuple[float, int]:
+def _get_value_latency(
+    res_map: Dict[str, MetricResult],
+    key: str,
+) -> tuple[float | dict[str, float], int]:
     res = res_map.get(key)
     if res is None or res.value is None:
         return 0.0, 0
-    if not isinstance(res.value, dict):
-        try:            
-            val = float(res.value)  # type: ignore[arg-type]
-        except Exception:
-            val = 0.0
-        if val != val:  # NaN
-            val = 0.0
-        if val < 0.0:
-            val = 0.0
-        if val > 1.0:
-            val = 1.0
+
+    def _clamp_score(raw: Any) -> float:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return 0.0
+        if value != value:
+            return 0.0
+        if value < 0.0:
+            return 0.0
+        if value > 1.0:
+            return 1.0
+        return value
+
+    value = res.value
+    if isinstance(value, Mapping):
+        normalized: dict[str, float] = {}
+        for device, raw_score in value.items():
+            normalized[str(device)] = _clamp_score(raw_score)
+        metric_value: float | dict[str, float] = normalized
     else:
-        val = res.value
-        for key in val.keys():
-            kval = float(val[key])
-            if kval != kval:
-                kval = 0.0
-            if kval < 0.0:
-                kval = 0.0
-            if kval > 1.0:
-                kval = 1.0
-            val[key] = kval
+        metric_value = _clamp_score(value)
+
     try:
-        lat = int(res.latency_ms)
-    except Exception:
-        lat = 0
-    return val, lat
+        latency = int(res.latency_ms)
+    except (TypeError, ValueError):
+        latency = 0
+
+    return metric_value, latency
 
 
 def build_output_object(group: Dict[str, str], results: List[MetricResult]) \
@@ -76,12 +80,26 @@ def build_output_object(group: Dict[str, str], results: List[MetricResult]) \
     pclaim_val, pclaim_lat = _get_value_latency(res_map, "performance_claims")
     bfact_val, bfact_lat = _get_value_latency(res_map, "bus_factor")
 
-    size_val_avg = 0.0
-    if isinstance(size_val, dict):
-        size_val_avg = sum(size_val.values()) / len(size_val.values()) 
-    components = [ramp_val, lic_val, size_val_avg, avail_val,
-                  dquality_val, cquality_val, pclaim_val, bfact_val]
-    net_val = sum(components) / len(components) if components else 0.0
+    def _score_mean(value: float | dict[str, float]) -> float:
+        if isinstance(value, Mapping):
+            values = list(value.values())
+            if not values:
+                return 0.0
+            return sum(values) / len(values)
+        return float(value)
+
+    size_scalar = _score_mean(size_val)
+    components = [
+        _score_mean(ramp_val),
+        _score_mean(lic_val),
+        size_scalar,
+        _score_mean(avail_val),
+        _score_mean(dquality_val),
+        _score_mean(cquality_val),
+        _score_mean(pclaim_val),
+        _score_mean(bfact_val),
+    ]
+    net_val = sum(components) / len(components)
     net_lat = ramp_lat + lic_lat + size_lat + avail_lat + \
         dquality_lat + cquality_lat + pclaim_lat + bfact_lat
 
