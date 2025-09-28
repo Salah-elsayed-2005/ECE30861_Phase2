@@ -19,6 +19,8 @@ from src.Client import GitClient, HFClient, PurdueClient
 from src.logging_utils import get_logger
 from src.utils import browse_hf_repo, injectHFBrowser
 
+import sys
+
 logger = get_logger(__name__)
 
 
@@ -239,6 +241,8 @@ class RampUpTime(Metric):
         try:
             full_page_text = injectHFBrowser(url)
         except Exception:
+            sys.stderr.write("Readme fetch failed")
+            sys.stderr.write(str(Exception))
             full_page_text = ""
         usage_text = self._extract_usage_section(full_page_text)
 
@@ -306,6 +310,9 @@ class RampUpTime(Metric):
                 description="Ramp-up LLM score",
             )
         except Exception:
+            sys.stderr.write("Ramp-up LLM scoring failed; defaulting to 0.5")
+            sys.stderr.write(str(Exception))
+
             logger.info("Ramp-up LLM scoring failed; defaulting to 0.5",
                         exc_info=True)
             return 0.5
