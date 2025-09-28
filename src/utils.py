@@ -3,10 +3,10 @@
 
 from typing import List, Tuple
 
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
+import re
+
+import requests
+from bs4 import BeautifulSoup
 
 from src.Client import HFClient
 from src.logging_utils import get_logger
@@ -68,60 +68,67 @@ def browse_hf_repo(
     return files
 
 
-def injectHFBrowser(model: str, headless: bool = True) -> str:
+_HF_DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
+}
+
+
+def injectHFBrowser(model: str, headless: bool = True, timeout: float = 20.0) -> str:
     """
-    Retrieve the rendered Hugging Face model page via Selenium.
+    Retrieve the Hugging Face model page using an HTTP request.
 
     Parameters
     ----------
     model : str
         Fully-qualified URL for the target Hugging Face model repository.
     headless : bool
-        When True (default), runs Chrome in headless mode so no window appears.
+        Retained for compatibility with the previous Selenium-based API.
+    timeout : float
+        Maximum time (seconds) to wait for the HTTP response.
 
     Returns
     -------
     str
-        Visible text contained within the page `<body>` element.
+        Visible text contained within the page `<main>` element (or `<body>`).
 
-    Notes
-    -----
-    A new Chrome WebDriver instance is created per call to avoid leaking
-    session state between runs. The host must have a compatible chromedriver
-    installation available on the PATH.
+    Raises
+    ------
+    RuntimeError
+        If the Hugging Face page cannot be downloaded.
     """
-    # Use an ephemeral Chrome session so each call starts from a clean slate.
-    # Configure Chrome to run headless by default to avoid opening a window.
-    chrome_options = webdriver.ChromeOptions()
-    if headless:
-        # Use the modern headless mode if available
-        chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1280,800")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--disable-infobars")
+    _ = headless  # maintained for call-sites; no longer used.
 
     logger.info("Fetching Hugging Face page %s", model)
-    driver = webdriver.Chrome(options=chrome_options)
     try:
-        driver.get(model)
+        response = requests.get(model, headers=_HF_DEFAULT_HEADERS, timeout=timeout)
+        response.raise_for_status()
+    except requests.RequestException as exc:  # pragma: no cover - network issues
+        logger.info("Failed to fetch Hugging Face page %s: %s", model, exc)
+        raise RuntimeError(f"Failed to fetch Hugging Face page: {model}") from exc
 
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "main"))
-        )
-        # Wait until the body content is fully rendered
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
-        )
+    soup = BeautifulSoup(response.text, "html.parser")
+    container = soup.find("main") or soup.find("body")
+    if container is None:
+        logger.debug("No <main> or <body> element found for %s", model)
+        return ""
 
-        # Get *all* visible text on the page
-        page_text = driver.find_element(By.TAG_NAME, "body").text
-        logger.debug("Fetched page text length %d for %s",
-                     len(page_text),
-                     model)
-        return page_text
+    text = container.get_text(separator="\n")
+    cleaned = _normalize_hf_text(text)
+    logger.debug("Fetched page text length %d for %s", len(cleaned), model)
+    return cleaned
 
-    finally:
-        driver.quit()
-        logger.debug("Closed browser session for %s", model)
+
+def _normalize_hf_text(raw_text: str) -> str:
+    """Collapse excessive whitespace while preserving paragraph breaks."""
+
+    # Replace Windows-style line endings and collapse multiple blank lines.
+    text = raw_text.replace("\r\n", "\n")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    # Strip trailing spaces on each line for consistency.
+    lines = [line.rstrip() for line in text.splitlines()]
+    return "\n".join(lines).strip()

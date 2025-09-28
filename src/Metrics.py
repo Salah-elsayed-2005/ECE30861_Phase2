@@ -237,7 +237,7 @@ class RampUpTime(Metric):
             raise ValueError("Missing required input: model_url")
 
         logger.info("Computing ramp-up score for %s", url)
-        # Fetch the full page text using Selenium; if it fails, treat as empty
+        # Fetch the full page text using an HTTP scrape; on failure, treat empty
         try:
             full_page_text = injectHFBrowser(url)
         except Exception:
@@ -684,9 +684,9 @@ class AvailabilityMetric(Metric):
     Metric that checks whether a model has an associated dataset and codebase
     available. Awards 0.5 for each item found via the model card.
 
-    This metric uses Selenium (via ``injectHFBrowser``) to retrieve the full
-    rendered model page text and a Grok LLM to identify mentions/links to an
-    available dataset and an available code repository.
+    This metric retrieves the rendered model page text (via ``injectHFBrowser``)
+    and uses a Grok LLM to identify mentions/links to an available dataset and
+    an available code repository.
     """
 
     name = "Availability"

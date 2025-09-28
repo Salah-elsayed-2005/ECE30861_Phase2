@@ -36,14 +36,17 @@ def _configure_root_logger() -> None:
     _CONFIGURED = True
 
     log_file = os.getenv("LOG_FILE")
-    if not (log_file and log_file.endswith('log')):
-        raise ValueError("LOG_FILE Environment Variable Not Valid")
-    level = _parse_level(os.getenv("LOG_LEVEL"))
-
     if not log_file:
         # Nothing to configure; leave logger disabled.
         _LOGGER.disabled = True
         return
+
+    if not log_file.endswith(".log"):
+        # Defer hard validation to the CLI layer; keep logger disabled here.
+        _LOGGER.disabled = True
+        return
+
+    level = _parse_level(os.getenv("LOG_LEVEL"))
 
     log_path = Path(log_file).expanduser()
     try:

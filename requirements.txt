@@ -5,5 +5,4 @@ flake8
 mypy
 types-requests
 python-dotenv
-selenium
-webdriver-manager
+beautifulsoup4

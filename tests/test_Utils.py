@@ -1,7 +1,8 @@
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
-import src.utils as utils
+import requests
+
 from src.Client import HFClient
 from src.utils import browse_hf_repo, injectHFBrowser
 
@@ -75,60 +76,44 @@ class TestBrowseHFRepo(unittest.TestCase):
 
 
 class TestInjectHFBrowser(unittest.TestCase):
-    """Verify Selenium-driven Hugging Face page scraping helper."""
+    """Verify HTTP-based Hugging Face page fetching helper."""
 
-    @patch("src.utils.WebDriverWait")
-    @patch("src.utils.webdriver.Chrome")
-    def test_returns_body_text_and_cleans_up(
-        self,
-        mock_chrome_cls: MagicMock,
-        mock_wait_cls: MagicMock,
-    ) -> None:
-        driver = MagicMock()
-        mock_chrome_cls.return_value = driver
-
-        wait_instance = MagicMock()
-        mock_wait_cls.return_value = wait_instance
-
-        body_element = MagicMock()
-        body_element.text = "Visible content"
-        driver.find_element.return_value = body_element
+    @patch("src.utils.requests.get")
+    def test_returns_main_text(self, mock_get: MagicMock) -> None:
+        response = MagicMock()
+        response.text = """
+            <html>
+              <main>
+                <h1>Title</h1>
+                <p>Line one.</p>
+                <p>Line two.</p>
+              </main>
+            </html>
+        """
+        mock_get.return_value = response
 
         url = "https://huggingface.co/owner/model"
         output = injectHFBrowser(url)
 
-        self.assertEqual(output, "Visible content")
-        # Chrome should be created with options (headless by default)
-        mock_chrome_cls.assert_called_once()
-        _args, kwargs = mock_chrome_cls.call_args
-        self.assertIn("options", kwargs)
-        self.assertIsNotNone(kwargs["options"])  # ensure options was provided
-        driver.get.assert_called_once_with(url)
-        self.assertEqual(wait_instance.until.call_count, 2)
-        driver.find_element.assert_called_once()
-        args, _ = driver.find_element.call_args
-        self.assertEqual(args, (utils.By.TAG_NAME, "body"))
-        driver.quit.assert_called_once()
+        response.raise_for_status.assert_called_once()
+        mock_get.assert_called_once_with(
+            url,
+            headers=ANY,
+            timeout=20.0,
+        )
+        self.assertIn("Title", output)
+        self.assertIn("Line one.", output)
+        self.assertIn("Line two.", output)
 
-    @patch("src.utils.WebDriverWait")
-    @patch("src.utils.webdriver.Chrome")
-    def test_quits_driver_even_on_failure(
+    @patch("src.utils.requests.get")
+    def test_raises_runtime_error_when_request_fails(
         self,
-        mock_chrome_cls: MagicMock,
-        mock_wait_cls: MagicMock,
+        mock_get: MagicMock,
     ) -> None:
-        driver = MagicMock()
-        mock_chrome_cls.return_value = driver
-
-        wait_instance = MagicMock()
-        mock_wait_cls.return_value = wait_instance
-
-        driver.find_element.side_effect = RuntimeError("boom")
+        mock_get.side_effect = requests.RequestException("boom")
 
         with self.assertRaises(RuntimeError):
             injectHFBrowser("https://huggingface.co/owner/broken")
-
-        driver.quit.assert_called_once()
 
 
 if __name__ == "__main__":
