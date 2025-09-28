@@ -77,11 +77,7 @@ _HF_DEFAULT_HEADERS = {
 }
 
 
-def injectHFBrowser(
-    model: str,
-    headless: bool = True,
-    timeout: float = 20.0,
-) -> str:
+def injectHFBrowser(model: str, headless: bool = True, timeout: float = 20.0) -> str:
     """
     Retrieve the Hugging Face model page using an HTTP request.
 
@@ -108,18 +104,11 @@ def injectHFBrowser(
 
     logger.info("Fetching Hugging Face page %s", model)
     try:
-        response = requests.get(
-            model,
-            headers=_HF_DEFAULT_HEADERS,
-            timeout=timeout,
-        )
+        response = requests.get(model, headers=_HF_DEFAULT_HEADERS, timeout=timeout)
         response.raise_for_status()
-    except requests.RequestException as exc:
-        # pragma: no cover - network issues
+    except requests.RequestException as exc:  # pragma: no cover - network issues
         logger.info("Failed to fetch Hugging Face page %s: %s", model, exc)
-        raise RuntimeError(
-            f"Failed to fetch Hugging Face page: {model}"
-        ) from exc
+        raise RuntimeError(f"Failed to fetch Hugging Face page: {model}") from exc
 
     soup = BeautifulSoup(response.text, "html.parser")
     container = soup.find("main") or soup.find("body")

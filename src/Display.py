@@ -23,21 +23,18 @@ def _extract_model_name(model_url: str) -> str:
     return parts[-1]
 
 
-def _results_by_key(
-    results: Iterable[MetricResult],
-) -> Dict[str, MetricResult]:
+def _results_by_key(results: Iterable[MetricResult]) \
+                    -> Dict[str, MetricResult]:
     return {r.key: r for r in results}
 
 
-def _get_value_latency(
-    res_map: Dict[str, MetricResult],
-    key: str,
-) -> tuple[float, int]:
+def _get_value_latency(res_map: Dict[str, MetricResult], key: str) \
+                       -> tuple[float, int]:
     res = res_map.get(key)
     if res is None or res.value is None:
         return 0.0, 0
     if not isinstance(res.value, dict):
-        try:
+        try:            
             val = float(res.value)  # type: ignore[arg-type]
         except Exception:
             val = 0.0
@@ -65,10 +62,8 @@ def _get_value_latency(
     return val, lat
 
 
-def build_output_object(
-    group: Dict[str, str],
-    results: List[MetricResult],
-) -> Dict[str, Any]:
+def build_output_object(group: Dict[str, str], results: List[MetricResult]) \
+                        -> Dict[str, Any]:
     logger.debug("Building output object for group %s", group)
     res_map = _results_by_key(results)
 
@@ -83,28 +78,12 @@ def build_output_object(
 
     size_val_avg = 0.0
     if isinstance(size_val, dict):
-        size_val_avg = sum(size_val.values()) / len(size_val.values())
-    components = [
-        ramp_val,
-        lic_val,
-        size_val_avg,
-        avail_val,
-        dquality_val,
-        cquality_val,
-        pclaim_val,
-        bfact_val,
-    ]
+        size_val_avg = sum(size_val.values()) / len(size_val.values()) 
+    components = [ramp_val, lic_val, size_val_avg, avail_val,
+                  dquality_val, cquality_val, pclaim_val, bfact_val]
     net_val = sum(components) / len(components) if components else 0.0
-    net_lat = (
-        ramp_lat
-        + lic_lat
-        + size_lat
-        + avail_lat
-        + dquality_lat
-        + cquality_lat
-        + pclaim_lat
-        + bfact_lat
-    )
+    net_lat = ramp_lat + lic_lat + size_lat + avail_lat + \
+        dquality_lat + cquality_lat + pclaim_lat + bfact_lat
 
     # Size score as multi-device object to match expected shape
     size_keys = ["raspberry_pi", "jetson_nano", "desktop_pc", "aws_server"]

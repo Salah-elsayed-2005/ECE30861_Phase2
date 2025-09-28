@@ -68,10 +68,7 @@ class Client(ABC):
                 logger.debug("Rate limit ok for %s", self.__class__.__name__)
                 break
 
-            delay = max(
-                self._rate_limit_wait_time(),
-                self._rate_limit_min_delay(),
-            )
+            delay = max(self._rate_limit_wait_time(), self._rate_limit_min_delay())
             logger.info(
                 "Rate limit hit for %s; sleeping %.3fs",
                 self.__class__.__name__,
