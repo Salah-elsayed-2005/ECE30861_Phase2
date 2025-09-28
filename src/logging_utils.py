@@ -37,8 +37,7 @@ def _configure_root_logger() -> None:
 
     log_file = os.getenv("LOG_FILE")
     if not (log_file and log_file.endswith('log')):
-        # raise ValueError("LOG_FILE Environment Variable Not Valid")
-        log_file = "bleh.log"
+        raise ValueError("LOG_FILE Environment Variable Not Valid")
     level = _parse_level(os.getenv("LOG_LEVEL"))
 
     if not log_file:
