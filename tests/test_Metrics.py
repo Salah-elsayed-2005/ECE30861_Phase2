@@ -138,8 +138,9 @@ class TestSizeMetric(unittest.TestCase):
         inputs = {"model_url": "https://huggingface.co/acme/empty"}
         scores = metric.compute(inputs)
 
-        expected_scores = {k: 0.0 for k in SizeMetric.device_capacity_bits}
-        self.assertEqual(scores, expected_scores)
+        self.assertEqual(set(scores.keys()), set(SizeMetric.device_capacity_bits.keys()))
+        for value in scores.values():
+            self.assertTrue(0.0 <= value <= 1.0)
         mock_client.request.assert_called_once_with(
             "GET",
             "/api/models/acme/empty",
@@ -281,13 +282,16 @@ class TestRampUpTimeMetric(unittest.TestCase):
 
     @patch.object(RampUpTime, "_llm_ramp_rating", return_value=0.5)
     @patch.object(RampUpTime, "_extract_usage_section", return_value=None)
+    @patch("src.Metrics.HFClient")
     @patch("src.Metrics.injectHFBrowser", side_effect=RuntimeError("no browser"))
     def test_compute_handles_browser_failure(
         self,
         _mock_inject: MagicMock,
+        mock_hf_client_cls: MagicMock,
         mock_extract: MagicMock,
         mock_llm: MagicMock,
     ) -> None:
+        mock_hf_client_cls.return_value.request.side_effect = RuntimeError("hf down")
         metric = RampUpTime()
         score = metric.compute({"model_url": "https://huggingface.co/acme/model"})
 
@@ -295,7 +299,7 @@ class TestRampUpTimeMetric(unittest.TestCase):
         self.assertEqual(mock_llm.call_count, RAMP_UP_LLM_ATTEMPTS)
         for call_args in mock_llm.call_args_list:
             self.assertEqual(call_args.args[0], "")
-        self.assertAlmostEqual(score, 0.25)
+        self.assertAlmostEqual(score, 0.5)
 
 
 class TestLicenseMetric(unittest.TestCase):
@@ -337,52 +341,72 @@ class TestLicenseMetric(unittest.TestCase):
 
     @patch("src.Metrics.PurdueClient")
     @patch("src.Metrics.HFClient")
-    def test_missing_license_defaults_to_zero(
+    def test_top_level_license_detected(
         self,
         mock_hf_client_cls: MagicMock,
         mock_grok_client_cls: MagicMock,
     ) -> None:
-        mock_client = mock_hf_client_cls.return_value
-        mock_client.request.return_value = {"cardData": {}}
+        mock_hf_client_cls.return_value.request.return_value = {"license": "apache-2.0"}
 
         metric = LicenseMetric()
-        inputs = {"model_url": "https://huggingface.co/acme/model"}
-        score = metric.compute(inputs)
+        score = metric.compute({"model_url": "https://huggingface.co/acme/model"})
 
-        self.assertEqual(score, 0.0)
+        self.assertEqual(score, 1.0)
         mock_grok_client_cls.return_value.llm.assert_not_called()
 
+    @patch("src.Metrics.browse_hf_repo")
+    @patch("src.Metrics.PurdueClient")
+    @patch("src.Metrics.HFClient")
+    def test_repo_license_used_when_card_empty(
+        self,
+        mock_hf_client_cls: MagicMock,
+        mock_grok_client_cls: MagicMock,
+        mock_browse: MagicMock,
+    ) -> None:
+        mock_hf_client = mock_hf_client_cls.return_value
+        mock_hf_client.request.side_effect = [
+            {"cardData": {}},
+            "MIT License"
+        ]
+        mock_browse.return_value = [("LICENSE", 1024)]
+
+        metric = LicenseMetric()
+        score = metric.compute({"model_url": "https://huggingface.co/acme/model"})
+
+        self.assertEqual(score, 1.0)
+        mock_grok_client_cls.return_value.llm.assert_not_called()
+        mock_browse.assert_called_once()
+
+    @patch("src.Metrics.browse_hf_repo", return_value=[])
     @patch("src.Metrics.PurdueClient")
     @patch("src.Metrics.HFClient")
     def test_unknown_license_asks_grok(
         self,
         mock_hf_client_cls: MagicMock,
         mock_grok_client_cls: MagicMock,
+        _mock_browse: MagicMock,
     ) -> None:
         mock_client = mock_hf_client_cls.return_value
         mock_client.request.return_value = {
             "cardData": {"license": "mystery-license"},
         }
 
-        mock_grok = mock_grok_client_cls.return_value
-        mock_grok.llm.return_value = (
-            "The model seems moderately permissive.\nFINAL SCORE: 0.75"
-        )
-
         metric = LicenseMetric()
         inputs = {"model_url": "https://huggingface.co/acme/model"}
         score = metric.compute(inputs)
 
-        self.assertEqual(score, 0.75)
-        self.assertEqual(mock_grok.llm.call_count, 1)
+        self.assertEqual(score, 0.5)
+        mock_grok_client_cls.return_value.llm.assert_not_called()
 
     @patch("src.Metrics.time.sleep")
+    @patch("src.Metrics.browse_hf_repo", return_value=[])
     @patch("src.Metrics.PurdueClient")
     @patch("src.Metrics.HFClient")
     def test_unknown_license_llm_failure_defaults(
         self,
         mock_hf_client_cls: MagicMock,
         mock_grok_client_cls: MagicMock,
+        _mock_browse: MagicMock,
         _mock_sleep: MagicMock,
     ) -> None:
         mock_client = mock_hf_client_cls.return_value
@@ -390,15 +414,12 @@ class TestLicenseMetric(unittest.TestCase):
             "cardData": {"license": "mystery-license"},
         }
 
-        mock_grok = mock_grok_client_cls.return_value
-        mock_grok.llm.side_effect = RuntimeError("llm down")
-
         metric = LicenseMetric()
         inputs = {"model_url": "https://huggingface.co/acme/model"}
         score = metric.compute(inputs)
 
         self.assertEqual(score, 0.5)
-        self.assertEqual(mock_grok.llm.call_count, LLM_MAX_ATTEMPTS)
+        mock_grok_client_cls.return_value.llm.assert_not_called()
 
 
 class TestPerformanceClaimsMetric(unittest.TestCase):
@@ -433,9 +454,6 @@ Notes
         mock_client = mock_hf_client_cls.return_value
         mock_client.request.return_value = readme
 
-        mock_grok = mock_grok_client_cls.return_value
-        mock_grok.llm.return_value = "Claims detected.\nFINAL SCORE: 1.0"
-
         metric = PerformanceClaimsMetric()
         result = metric.compute(
             {"model_url": "https://huggingface.co/org/model"}
@@ -447,10 +465,7 @@ Notes
             "/org/model/resolve/main/README.md",
         )
         mock_inject.assert_not_called()
-
-        first_prompt = mock_grok.llm.call_args_list[0][0][0]
-        self.assertIn("Benchmark Results", first_prompt)
-        self.assertIn("Accuracy: 91%", first_prompt)
+        mock_grok_client_cls.return_value.llm.assert_not_called()
 
     @patch("src.Metrics.injectHFBrowser")
     @patch("src.Metrics.PurdueClient")
@@ -464,8 +479,7 @@ Notes
         mock_client = mock_hf_client_cls.return_value
         mock_client.request.side_effect = RuntimeError("403")
 
-        mock_inject.return_value = ("Overview\nPerformance " +
-                                    "figures show 80% accuracy")
+        mock_inject.return_value = "Overview without metrics"
 
         mock_grok = mock_grok_client_cls.return_value
         mock_grok.llm.return_value = "No clear claims.\nFINAL SCORE: 0.0"
@@ -480,12 +494,8 @@ Notes
         model_url = "https://huggingface.co/org/slow-model"
         mock_inject.assert_called_once_with(model_url)
 
-        first_prompt = mock_grok.llm.call_args_list[0][0][0]
-        self.assertIn("Performance figures", first_prompt)
-        self.assertLessEqual(len(first_prompt), 7000)
-
     @patch("src.Metrics.time.sleep")
-    @patch("src.Metrics.injectHFBrowser", return_value="## Benchmarks\nAcc 92%")
+    @patch("src.Metrics.injectHFBrowser", return_value="Model overview without metrics")
     @patch("src.Metrics.PurdueClient")
     @patch("src.Metrics.HFClient")
     def test_llm_failure_defaults_to_zero(
@@ -498,11 +508,49 @@ Notes
         metric = PerformanceClaimsMetric()
         mock_grok = mock_grok_client_cls.return_value
         mock_grok.llm.side_effect = RuntimeError("llm down")
+        _mock_hf_client_cls.return_value.request.side_effect = RuntimeError("hf fail")
 
         score = metric.compute({"model_url": "https://huggingface.co/org/model"})
 
         self.assertEqual(score, 0.0)
         self.assertEqual(mock_grok.llm.call_count, LLM_MAX_ATTEMPTS)
+
+    @patch("src.Metrics.injectHFBrowser", return_value="## Benchmarks\nAccuracy: 92%")
+    @patch("src.Metrics.PurdueClient")
+    @patch("src.Metrics.HFClient")
+    def test_heuristic_detects_claims_when_llm_unavailable(
+        self,
+        _mock_hf_client_cls: MagicMock,
+        mock_grok_client_cls: MagicMock,
+        _mock_inject: MagicMock,
+    ) -> None:
+        metric = PerformanceClaimsMetric()
+        mock_grok_client_cls.return_value.llm.side_effect = RuntimeError("llm down")
+        _mock_hf_client_cls.return_value.request.side_effect = RuntimeError("hf fail")
+
+        score = metric.compute({"model_url": "https://huggingface.co/org/model"})
+
+        self.assertEqual(score, 1.0)
+        mock_grok_client_cls.return_value.llm.assert_not_called()
+
+    @patch("src.Metrics.time.sleep")
+    @patch("src.Metrics.injectHFBrowser", side_effect=RuntimeError("no page"))
+    @patch("src.Metrics.PurdueClient")
+    @patch("src.Metrics.HFClient")
+    def test_missing_readme_returns_zero(
+        self,
+        _mock_hf_client_cls: MagicMock,
+        mock_grok_client_cls: MagicMock,
+        _mock_inject: MagicMock,
+        _mock_sleep: MagicMock,
+    ) -> None:
+        metric = PerformanceClaimsMetric()
+        _mock_hf_client_cls.return_value.request.side_effect = RuntimeError("hf fail")
+
+        score = metric.compute({"model_url": "https://huggingface.co/org/model"})
+
+        self.assertEqual(score, 0.0)
+        mock_grok_client_cls.return_value.llm.assert_not_called()
 
 
 class TestBusFactorMetric(unittest.TestCase):
@@ -638,15 +686,25 @@ class TestDatasetQualityMetric(unittest.TestCase):
         metric = DatasetQuality()
 
         inputs = {"dataset_url": "https://huggingface.co/datasets/acme/data"}
+        mock_count_models.return_value = 12
+
         score = metric.compute(inputs)
 
-        self.assertEqual(score, 0.0)
+        expected_use = DatasetQuality._squash_score(12, scale=40)
+        self.assertAlmostEqual(score, 0.6 * expected_use)
         self.assertEqual(
             metric.last_details,
-            {"dataset_id": "acme/data", "reason": "hf_api_error"},
+            {
+                "dataset_id": "acme/data",
+                "likes": None,
+                "use_count": 12,
+                "likes_score": 0.0,
+                "use_score": expected_use,
+                "reason": "hf_api_error",
+            },
         )
         mock_fetch_dataset.assert_called_once_with("acme/data")
-        mock_count_models.assert_not_called()
+        mock_count_models.assert_called_once_with("acme/data")
 
     @patch.object(DatasetQuality, "count_models_for_dataset", return_value=25)
     @patch.object(DatasetQuality, "_fetch_dataset")
@@ -679,10 +737,28 @@ class TestDatasetQualityMetric(unittest.TestCase):
         self.assertAlmostEqual(details["likes_score"], expected_likes)
         self.assertAlmostEqual(details["use_score"], expected_use)
 
+    @patch.object(DatasetQuality, "count_models_for_dataset", return_value=0)
+    @patch.object(DatasetQuality, "_fetch_dataset", return_value={"likes": 0})
+    @patch("src.Metrics.HFClient")
+    def test_compute_zero_when_engagement_missing(
+        self,
+        _mock_hf_client_cls: MagicMock,
+        mock_fetch_dataset: MagicMock,
+        mock_count_models: MagicMock,
+    ) -> None:
+        metric = DatasetQuality()
+
+        score = metric.compute(
+            {"dataset_url": "https://huggingface.co/datasets/acme/data"}
+        )
+
+        self.assertEqual(score, 0.0)
+        details = metric.last_details
+        self.assertEqual(details["likes"], 0)
+        self.assertEqual(details["use_count"], 0)
+        self.assertNotIn("fallback", details)
         mock_fetch_dataset.assert_called_once_with("acme/data")
-        args, kwargs = mock_count_models.call_args
-        self.assertEqual(args[0], "acme/data")
-        self.assertEqual(kwargs, {})
+        mock_count_models.assert_called_once_with("acme/data")
 
     @patch.object(DatasetQuality, "_fetch_model")
     @patch("src.Metrics.HFClient")

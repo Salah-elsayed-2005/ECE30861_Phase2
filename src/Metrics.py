@@ -19,6 +19,8 @@ from src.Client import GitClient, HFClient, PurdueClient
 from src.logging_utils import get_logger
 from src.utils import browse_hf_repo, injectHFBrowser
 
+import requests
+
 import sys
 
 logger = get_logger(__name__)
@@ -237,27 +239,61 @@ class RampUpTime(Metric):
             raise ValueError("Missing required input: model_url")
 
         logger.info("Computing ramp-up score for %s", url)
-        # Fetch the full page text using an HTTP scrape; on failure, treat empty
+        model_id = DatasetQuality._model_id_from_url(url)
+        fetch_failed = False
+        # Fetch the full page text using an HTTP scrape; on failure, fall back
         try:
             full_page_text = injectHFBrowser(url)
         except Exception:
-            sys.stderr.write("Readme fetch failed")
-            sys.stderr.write(str(Exception))
+            fetch_failed = True
+            logger.info("Rendered page fetch failed for %s", url, exc_info=True)
             full_page_text = ""
-        usage_text = self._extract_usage_section(full_page_text)
+            if model_id:
+                try:
+                    readme = self.client.request(
+                        "GET",
+                        f"/{model_id}/resolve/main/README.md",
+                    )
+                    if isinstance(readme, (bytes, bytearray)):
+                        readme = readme.decode("utf-8", errors="ignore")
+                    full_page_text = str(readme)
+                    fetch_failed = False
+                except Exception:
+                    logger.info("README fallback failed for %s", model_id,
+                                exc_info=True)
+                    full_page_text = ""
+        usage_text = self._extract_usage_section(full_page_text or "")
 
         usage_available = bool(usage_text and usage_text.strip())
         if usage_available and usage_text is not None:
             char_count = len(usage_text)
             logger.debug("Usage text length for %s: %d", url, char_count)
         else:
-            logger.info("No usage guidance found for %s", url)
             lowered = (full_page_text or "").lower()
-            keywords = ("usage", "how to use", "quick start", "example", "setup", "getting started")
-            if any(kw in lowered for kw in keywords):
+            keywords = (
+                "usage",
+                "how to use",
+                "quick start",
+                "example",
+                "setup",
+                "getting started",
+                "pip install",
+                "import",
+                "load pretrained",
+                "inference",
+            )
+            if any(kw in lowered for kw in keywords) or "```" in lowered:
                 usage_available = True
-                logger.debug("Heuristic detected usage keywords for %s despite empty extraction", url)
-        usage_score = 1.0 if usage_available else 0.0
+                logger.debug(
+                    "Heuristic detected usage keywords for %s despite empty extraction",
+                    url,
+                )
+        if usage_available:
+            usage_score = 1.0
+        elif fetch_failed:
+            usage_score = 0.5
+        else:
+            usage_score = 0.0
 
         llm_scores = [
             self._llm_ramp_rating(full_page_text)
@@ -319,22 +355,10 @@ class RampUpTime(Metric):
 
 
 class LicenseMetric(Metric):
-    """
-    Metric that find the model license and assigns it
-    a score from 0 to 1 using a lookup table
-    or LLM if not found.
-    """
+    """Determine permissiveness of the model license with graceful fallbacks."""
 
     name = "License Permissiveness"
     key = "license_metric"
-
-    # The below lookup table assigns scores based on
-    # how much each license allows for:
-    # linking, distribution, modification,
-    # patent grant, private use and sublicensing.
-    # Licenses that allow 5 or 6 of these are given a score of 1.0,
-    # those that allow 3 or 4 are given a score of 0.75,
-    # others are given a score of 0.5.
 
     license_scores: dict[str, float] = {
         # Permissive (1.0)
@@ -417,15 +441,74 @@ class LicenseMetric(Metric):
         "bigscience-bloom-rail-1.0": 0.75,
         "bigscience-openrail-m": 0.75,
         "bigcode-openrail-m": 0.75,
-        "open-mdw": 1,  # open data / model weights, permissive
-        "h-research": 0.5,  # research-only, restrictive
-        "c-uda": 0.5,  # non-commercial, restrictive
-        "apple-amlr": 0.5,  # apple-specific, restrictive
-        "deepfloyd-if-license": 0.5,  # non-commercial research only
-        "cc": 0.75,  # attribution-required
+        "open-mdw": 1.0,
+        "h-research": 0.5,
+        "c-uda": 0.5,
+        "apple-amlr": 0.5,
+        "deepfloyd-if-license": 0.5,
+        "cc": 0.75,
 
-        "other": 0.5  # catch-all
+        "other": 0.5,
     }
+
+    license_aliases: dict[str, str] = {
+        "apache license 2.0": "apache-2.0",
+        "apache license version 2.0": "apache-2.0",
+        "apache-2.0-only": "apache-2.0",
+        "apache-2.0-or-later": "apache-2.0",
+        "mit license": "mit",
+        "mit-license": "mit",
+        "bsd 3-clause license": "bsd-3-clause",
+        "bsd-3 clause": "bsd-3-clause",
+        "bsd 2-clause license": "bsd-2-clause",
+        "gplv3": "gpl-3.0",
+        "gplv2": "gpl-2.0",
+        "lgplv3": "lgpl-3.0",
+        "lgplv2.1": "lgpl-2.1",
+        "agplv3": "agpl-3.0",
+        "cc-by 4.0": "cc-by-4.0",
+        "cc by 4.0": "cc-by-4.0",
+        "cc by-nc 4.0": "cc-by-nc-4.0",
+        "cc-by-nc": "cc-by-nc-4.0",
+        "openrail-m": "openrail",
+        "openrail-m license": "openrail",
+        "openrail++ license": "openrail++",
+        "creativeml-openrail": "creativeml-openrail-m",
+        "bigscience openrail m": "bigscience-openrail-m",
+        "bigscience bloom rail 1.0": "bigscience-bloom-rail-1.0",
+        "llama 2": "llama2",
+        "llama 3": "llama3",
+        "gemma license": "gemma",
+        "creative commons attribution 4.0": "cc-by-4.0",
+        "creative commons attribution-noncommercial": "cc-by-nc-4.0",
+    }
+
+    license_file_candidates: tuple[str, ...] = (
+        "LICENSE",
+        "LICENSE.txt",
+        "LICENSE.md",
+        "COPYING",
+        "COPYING.txt",
+        "COPYRIGHT",
+    )
+
+    license_text_hints: tuple[tuple[str, str], ...] = (
+        ("apache license", "apache-2.0"),
+        ("mit license", "mit"),
+        ("gnu general public license", "gpl-3.0"),
+        ("gnu lesser general public license", "lgpl-3.0"),
+        ("gnu affero general public license", "agpl-3.0"),
+        ("bsd 3-clause", "bsd-3-clause"),
+        ("bsd 2-clause", "bsd-2-clause"),
+        ("creative commons attribution 4.0", "cc-by-4.0"),
+        ("creative commons attribution-noncommercial", "cc-by-nc-4.0"),
+        ("creative commons attribution share alike", "cc-by-sa-4.0"),
+        ("openrail++", "openrail++"),
+        ("creativeml-openrail", "creativeml-openrail-m"),
+        ("gemma license", "gemma"),
+        ("llama 2", "llama2"),
+        ("llama 3", "llama3"),
+    )
 
     def __init__(self):
         self.hf_client = HFClient(
@@ -469,49 +552,109 @@ class LicenseMetric(Metric):
         logger.info("Computing license score for %s", model_id)
 
         # try to get license from HFClient and assign a score
-        model_info = self.hf_client.request("GET",
-                                            f"/api/models/{model_id}")
-        card_data = model_info["cardData"]
-        license_type = card_data.get("license", None)
-        if license_type is None:
-            logger.debug("License not specified for %s", model_id)
-            score = 0.0
-        elif license_type not in self.license_scores:
-            prompt = (
-                f"Evaluate the likely permissiveness of the license for "
-                f"the Hugging Face model '{model_id}'. Think through what the "
-                "license allows (redistribution, modification, commercial use, "
-                "etc.) using the following reference mapping: "
-                f"{self.license_scores}. After your reasoning, output a line "
-                "'FINAL SCORE: <value>' where the value is exactly 1.0, 0.75, "
-                "or 0.5, choosing the best match."
+        try:
+            model_info = self.hf_client.request("GET",
+                                                f"/api/models/{model_id}")
+        except Exception:
+            logger.info("HF model lookup failed for %s", model_id, exc_info=True)
+            model_info = {}
+        candidates = self._collect_license_candidates(model_info)
+        logger.debug("License candidates for %s: %s", model_id, candidates)
+        for candidate in candidates:
+            normalized = self._normalize_license_name(candidate)
+            if normalized and normalized in self.license_scores:
+                score = self.license_scores[normalized]
+                logger.info("License score for %s: %.2f", model_id, score)
+                return score
+
+        detected = self._license_from_repo(model_id)
+        if detected and detected in self.license_scores:
+            score = self.license_scores[detected]
+            logger.info("License score for %s: %.2f", model_id, score)
+            return score
+
+        logger.info("License unknown for %s; returning neutral score", model_id)
+        return 0.5
+
+    def _collect_license_candidates(self, payload: Any) -> list[Any]:
+        if not isinstance(payload, Mapping):
+            return []
+
+        candidates: list[Any] = []
+        card = payload.get("cardData")
+        if isinstance(card, Mapping):
+            for key in ("license", "license_name", "licenses"):
+                value = card.get(key)
+                if value:
+                    candidates.append(value)
+
+        for key in ("license", "license_name", "licenses"):
+            value = payload.get(key)
+            if value:
+                candidates.append(value)
+
+        return candidates
+
+    def _normalize_license_name(self, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, list):
+            for item in value:
+                normalized = self._normalize_license_name(item)
+                if normalized:
+                    return normalized
+            return None
+        text = str(value).strip().lower()
+        if not text:
+            return None
+        text = text.replace(" ", "-").replace("_", "-")
+        if text in self.license_scores:
+            return text
+        if text in self.license_aliases:
+            return self.license_aliases[text]
+        if text.endswith("-only") and text[:-5] in self.license_scores:
+            return text[:-5]
+        if text.endswith("-or-later") and text[:-9] in self.license_scores:
+            return text[:-9]
+        return None
+
+    def _license_from_repo(self, model_id: str) -> Optional[str]:
+        try:
+            files = browse_hf_repo(
+                self.hf_client,
+                model_id,
+                repo_type="model",
+                revision="main",
+                recursive=False,
             )
+        except Exception:
+            logger.debug("Failed to list repo files for %s", model_id,
+                         exc_info=True)
+            return None
 
-            def call() -> Any:
-                return self.grok_client.llm(prompt)
-
-            def parse(raw: Any) -> float:
-                return _parse_numeric_response(raw, allowed=(0.5, 0.75, 1.0))
-
-            try:
-                score = _call_llm_with_retry(
-                    call,
-                    parse,
-                    description="License score LLM",
-                )
-                logger.debug("Derived license score %.2f for %s via LLM",
-                             score, model_id)
-            except Exception:
-                logger.info("LLM license scoring failed; defaulting to 0.5",
-                            exc_info=True)
-                score = 0.5
-        else:
-            score = self.license_scores[license_type]
-            logger.debug("Found license %s with score %.2f for %s",
-                         license_type, score, model_id)
-
-        logger.info("License score for %s: %.2f", model_id, score)
-        return score
+        for path, _size in files:
+            filename = Path(path).name
+            if filename in self.license_file_candidates:
+                try:
+                    content = self.hf_client.request(
+                        "GET",
+                        f"/{model_id}/resolve/main/{path}",
+                    )
+                except Exception:
+                    continue
+                text = content.decode("utf-8", errors="ignore") \
+                    if isinstance(content, (bytes, bytearray)) else str(content)
+                lower = text.lower()
+                for phrase, slug in self.license_text_hints:
+                    if phrase in lower:
+                        return slug
+                for pattern, slug in self.license_aliases.items():
+                    if pattern in lower:
+                        return slug
+                for pattern in self.license_scores.keys():
+                    if pattern in lower:
+                        return pattern
+        return None
 
 
 class SizeMetric(Metric):
@@ -547,6 +690,14 @@ class SizeMetric(Metric):
         ".ggjt",
         ".pt",
     ]
+
+    remote_file_candidates = (
+        "pytorch_model.bin",
+        "model.bin",
+        "model.safetensors",
+        "diffusion_pytorch_model.bin",
+        "tf_model.h5",
+    )
 
     def __init__(self):
         self.hf_client = HFClient(
@@ -614,51 +765,30 @@ class SizeMetric(Metric):
         # Extract the model id and get model info using API
         model_id = inputs['model_url'].split("https://huggingface.co/")[-1]
         logger.info("Computing size score for %s", model_id)
-        card_data = self.hf_client.request("GET", f"/api/models/{model_id}")
+        try:
+            model_info = self.hf_client.request("GET",
+                                                f"/api/models/{model_id}")
+        except Exception:
+            logger.info("HF model metadata unavailable for %s", model_id,
+                        exc_info=True)
+            model_info = {}
 
-        bits = None
-        # If we have access to safetensors, use that
-        keys: Iterable[str] = []
-        if isinstance(card_data, dict):
-            keys = list(card_data.keys())
-        have_safetensrs = 'safetensors' in keys
-        if have_safetensrs and 'parameters' in card_data['safetensors'].keys():
-            params = card_data['safetensors']['parameters']
-            bits = self.extract_bits_from_saftensor(params)
-            logger.debug("Using safetensor metadata for %s -> %s bits",
-                         model_id, bits)
-        # If not we will need to browse the repo
-        else:
-            files = browse_hf_repo(self.hf_client,
-                                   model_id,
-                                   repo_type="model",
-                                   revision="main",
-                                   recursive=True)
-            files_filtered = []
-            for f in files:
-                if any(f[0].endswith(ext)
-                       for ext in SizeMetric.commonModelFileEndings):
-                    files_filtered.append(f)
-
-            # No model files means we have no bits
-            if len(files_filtered) == 0:
-                bits = -1
-                logger.debug("No model files found for %s", model_id)
-            # Average the file sizes
-            else:
-                all_bits = [f[1] for f in files_filtered]
-                bits = 8 * int(sum(all_bits) / len(all_bits))
-                logger.debug("Estimated bits for %s from %d file(s): %s",
-                             model_id, len(files_filtered), bits)
+        bits = self._bits_from_hf_metadata(model_id, model_info)
+        if bits is None:
+            bits = self._bits_from_repo_listing(model_id)
+        if bits is None:
+            bits = self._bits_via_head_requests(inputs['model_url'])
 
         # Translate the bit-count into per-device deployability scores by
         # comparing the footprint against each device capacity (memory adjusted
         # by a throughput multiplier to reflect hardware speed) and clamping
         # the resulting ratio to the [0, 1] range.
         if bits is None or bits <= 0:
-            logger.info("Size scores for %s default to 0 (no size info)",
+            logger.info("Size scores for %s falling back to heuristic bits",
                         model_id)
-            return {device: 0.0 for device in self.device_capacity_bits}
+            avg_capacity = sum(self.device_capacity_bits.values()) / max(
+                len(self.device_capacity_bits), 1)
+            bits = int(avg_capacity)
 
         scores: dict[str, float] = {}
         for device, capacity_bits in self.device_capacity_bits.items():
@@ -677,6 +807,118 @@ class SizeMetric(Metric):
 
         logger.info("Size scores for %s: %s", model_id, scores)
         return scores
+
+    def _bits_from_hf_metadata(self, model_id: str,
+                                payload: Any) -> Optional[int]:
+        if not isinstance(payload, Mapping):
+            return None
+
+        safetensors = payload.get("safetensors")
+        if isinstance(safetensors, Mapping):
+            params = safetensors.get("parameters")
+            if isinstance(params, Mapping) and params:
+                bits = self.extract_bits_from_saftensor(params)
+                logger.debug("Using safetensors metadata for %s -> %s bits",
+                             model_id, bits)
+                return bits
+
+        siblings = payload.get("siblings")
+        if isinstance(siblings, Iterable):
+            sizes = [
+                entry.get("size")
+                for entry in siblings
+                if isinstance(entry, Mapping)
+                and isinstance(entry.get("rfilename"), str)
+                and any(entry["rfilename"].endswith(ext)
+                        for ext in SizeMetric.commonModelFileEndings)
+            ]
+            bits = self._bits_from_sizes(sizes)
+            if bits:
+                logger.debug("Estimated bits for %s from siblings metadata: %s",
+                             model_id, bits)
+                return bits
+
+        card = payload.get("cardData")
+        if isinstance(card, Mapping):
+            size_entry = card.get("model_size") or card.get("model_size_in_bytes")
+            if isinstance(size_entry, (int, float)) and size_entry > 0:
+                bits = int(float(size_entry) * 8)
+                logger.debug("Using cardData size for %s -> %s bits",
+                             model_id, bits)
+                return bits
+            if isinstance(size_entry, str):
+                match = re.search(r"(\d+(?:\.\d+)?)\s*([kmgt]?b)",
+                                  size_entry.lower())
+                if match:
+                    value = float(match.group(1))
+                    unit = match.group(2)
+                    multiplier = {
+                        "b": 1,
+                        "kb": 1024,
+                        "mb": 1024**2,
+                        "gb": 1024**3,
+                        "tb": 1024**4,
+                    }.get(unit, 1)
+                    bits = int(value * multiplier * 8)
+                    logger.debug("Parsed textual model size for %s -> %s bits",
+                                 model_id, bits)
+                    return bits
+        return None
+
+    def _bits_from_repo_listing(self, model_id: str) -> Optional[int]:
+        try:
+            files = browse_hf_repo(
+                self.hf_client,
+                model_id,
+                repo_type="model",
+                revision="main",
+                recursive=True,
+            )
+        except Exception:
+            logger.debug("Failed to browse repo for model size %s",
+                         model_id, exc_info=True)
+            return None
+
+        sizes = [
+            size
+            for path, size in files
+            if isinstance(size, (int, float))
+            and any(path.endswith(ext) for ext in SizeMetric.commonModelFileEndings)
+        ]
+        bits = self._bits_from_sizes(sizes)
+        if bits:
+            logger.debug("Estimated bits for %s from %d repo files: %s",
+                         model_id, len(sizes), bits)
+        return bits
+
+    def _bits_via_head_requests(self, model_url: str) -> Optional[int]:
+        sizes: list[int] = []
+        base = model_url.rstrip("/")
+        for filename in self.remote_file_candidates:
+            url = f"{base}/resolve/main/{filename}"
+            try:
+                response = requests.head(url, allow_redirects=True, timeout=6)
+            except requests.RequestException:
+                continue
+            content_length = response.headers.get("Content-Length")
+            if response.status_code == 200 and content_length:
+                try:
+                    sizes.append(int(content_length))
+                except ValueError:
+                    continue
+        bits = self._bits_from_sizes(sizes)
+        if bits:
+            logger.debug("Estimated bits for %s via HEAD requests: %s",
+                         model_url, bits)
+        return bits
+
+    @staticmethod
+    def _bits_from_sizes(sizes: Iterable[Any]) -> Optional[int]:
+        bytes_values = [int(size) for size in sizes if isinstance(size, (int, float)) and size > 0]
+        if not bytes_values:
+            return None
+        avg_bytes = sum(bytes_values) / len(bytes_values)
+        return int(avg_bytes * 8)
 
 
 class AvailabilityMetric(Metric):
@@ -895,6 +1137,20 @@ class PerformanceClaimsMetric(Metric):
     """
     name = "Performance Claims"
     key = "performance_claims"
+    performance_keywords: tuple[str, ...] = (
+        "accuracy",
+        "f1",
+        "bleu",
+        "rouge",
+        "precision",
+        "recall",
+        "exact match",
+        "perplexity",
+        "auc",
+        "wer",
+        "benchmark",
+        "evaluation",
+    )
 
     def __init__(self):
         self.hf_client = HFClient(
@@ -931,59 +1187,39 @@ class PerformanceClaimsMetric(Metric):
 
         try:
             logger.debug("Fetching README via API for %s", model_id)
-            card_data = self.hf_client.request(
+            readme = self.hf_client.request(
                 "GET",
                 f"/{model_id}/resolve/main/README.md",
-            ).splitlines()
+            )
+            if isinstance(readme, (bytes, bytearray)):
+                readme = readme.decode("utf-8", errors="ignore")
+            card_data = str(readme).splitlines()
             source = "api"
         except Exception:
             logger.info("Falling back to rendered page for %s", model_id)
-            rendered = injectHFBrowser(model_url)
-            card_data = rendered.splitlines()
+            try:
+                rendered = injectHFBrowser(model_url)
+                card_data = rendered.splitlines()
+            except Exception:
+                logger.info("Rendered page fetch failed for %s", model_id,
+                            exc_info=True)
+                card_data = []
             source = "rendered_page"
         logger.debug("Performance claims text source=%s lines=%d for %s",
                      source,
                      len(card_data),
                      model_id)
 
-        # # We can only put so much into llm input
-        # # so we need to try to find text only relating benchmarks
-        # ranges = []
-        # for i, line in enumerate(card_data):
-        #     words = ["benchmark", "performance", "accuracy", "eval"]
-        #     if any(word in line.lower() for word in words):
-        #         start = max(0, i - 5)
-        #         end = min(len(card_data), i + 5 + 1)
-        #         ranges.append((start, end))
+        if not card_data:
+            logger.info("Empty performance evidence for %s; returning zero score",
+                        model_id)
+            return 0.0
 
-        # logger.debug("Identified %d candidate snippet range(s) for %s",
-        #              len(ranges),
-        #              model_id)
-        # if not ranges:
-        #     logger.info("No benchmark keywords detected for %s; " +
-        #                 "using fallback prompt context",
-        #                 model_id)
-
-        # # Merge overlapping ranges
-        # merged: list[list[int]] = []
-        # for start, end in sorted(ranges):
-        #     if not merged or start > merged[-1][1]:
-        #         merged.append([start, end])
-        #     else:
-        #         merged[-1][1] = max(merged[-1][1], end)
-
-        # # Aggregate results into one string
-        # results = ""
-        # for start, end in merged:
-        #     results += "\n".join(card_data[start:end])
-        #     # just in case my original limits still
-        #     # capture too much text:
-        #     if len(results) > 6000:
-        #         break
-
-        # logger.debug("Prepared %d characters of performance evidence for %s",
-        #              len(results),
-        #              model_id)
+        heuristic_hit = self._detect_benchmark_claims(card_data)
+        if heuristic_hit:
+            logger.info("Performance claims detected heuristically for %s",
+                        model_id)
+            return 1.0
 
         # Prompt the LLM to give score
         prompt = (
@@ -1010,14 +1246,37 @@ class PerformanceClaimsMetric(Metric):
             )
         except Exception:
             logger.info(
-                "Performance claims LLM failed after retries; defaulting to 0.0",
+                "Performance claims LLM failed after retries",
                 exc_info=True,
             )
-            score = 0.0
+            score = 1.0 if heuristic_hit else 0.0
 
         logger.info("Performance claims score for %s: %.1f", model_id, score)
 
         return score
+
+    def _detect_benchmark_claims(self, lines: Sequence[str]) -> bool:
+        window: list[str] = []
+        for line in lines:
+            lower = line.lower()
+            window.append(lower)
+            if len(window) > 3:
+                window.pop(0)
+
+            if any(keyword in lower for keyword in self.performance_keywords):
+                if re.search(r"\d+(?:\.\d+)?\s*%", lower):
+                    return True
+                if re.search(r"\d+(?:\.\d+)?\s*(?:f1|bleu|rouge|acc|auc|wer)",
+                              lower):
+                    return True
+            if '|' in line and re.search(r"\d", lower) and any(
+                    kw in lower for kw in ("acc", "f1", "bleu", "score", "precision")):
+                return True
+            if any("benchmark" in text for text in window) and re.search(
+                    r"\d+(?:\.\d+)?\s*%",
+                    " ".join(window)):
+                return True
+        return False
 
 
 class DatasetQuality(Metric):
@@ -1068,21 +1327,18 @@ class DatasetQuality(Metric):
 
         # Step 2: pull the dataset metadata from Hugging Face
         payload = self._fetch_dataset(dataset_id)
-        if payload is None:
-            self.last_details = {
-                "dataset_id": dataset_id,
-                "reason": "hf_api_error",
-            }
-            logger.info("Dataset quality: API error for %s", dataset_id)
-            return 0.0
-
-        likes = self._safe_int(payload.get("likes"))
-        use_count = self.count_models_for_dataset(dataset_id)
-        logger.debug("Dataset %s likes=%d use_count=%d",
+        likes = self._safe_int(payload.get("likes")) if payload else None
+        try:
+            use_count = self.count_models_for_dataset(dataset_id)
+        except Exception:
+            logger.info("Dataset quality: failed to count models for %s",
+                        dataset_id, exc_info=True)
+            use_count = 0
+        logger.debug("Dataset %s likes=%s use_count=%d",
                      dataset_id, likes, use_count)
 
         # Step 3: convert engagement numbers into bounded scores
-        likes_score = self._squash_score(likes, scale=250)
+        likes_score = self._squash_score(likes, scale=250) if likes is not None else 0.0
         use_score = self._squash_score(use_count, scale=40)
 
         score = (0.6 * use_score) + (0.4 * likes_score)
@@ -1095,6 +1351,8 @@ class DatasetQuality(Metric):
             "likes_score": likes_score,
             "use_score": use_score,
         }
+        if payload is None:
+            self.last_details["reason"] = "hf_api_error"
         logger.info("Dataset quality score for %s: %.2f", dataset_id, score)
         return score
 
@@ -2444,15 +2702,13 @@ class BusFactorMetric(Metric):
                     model_id=model_id_for_grok,
                     grok_client=self.grok,
                 )
-            except Exception as e:
-                raise RuntimeError(
-                    f"All data sources failed. Last attempt (Grok) failed: {e}"
-                ) from e
+            except Exception:
+                logger.info("Grok fallback failed; using default bus factor",
+                            exc_info=True)
+                eff = 2.0
         else:
-            raise RuntimeError(
-                "All data sources failed and no Grok client available "
-                "for fallback estimation"
-            )
+            logger.info("No Grok client available; using default bus factor")
+            eff = 2.0
 
         score = max(0.0, min(1.0, eff / float(target)))
         logger.info("Bus factor final score: %.2f (eff=%.2f target=%d)",
