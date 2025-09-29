@@ -601,10 +601,10 @@ class LicenseMetric(Metric):
             return score
 
         logger.info(
-            "License unknown for %s; returning penalty score",
+            "License unknown for %s; returning neutral score",
             model_id,
         )
-        return 0.1
+        return 0.5
 
     def _collect_license_candidates(self, payload: Any) -> list[Any]:
         if not isinstance(payload, Mapping):
@@ -2717,7 +2717,7 @@ class BusFactorMetric(Metric):
         1) github (local path, then remote URL)
         2) huggingface model_url
         3) grok estimate (if available)
-        4) constant fallback (eff = 0.5)
+        4) constant fallback (eff = 2.0)
         """
         logger.info("Computing bus factor score")
         error: Optional[str] = None
@@ -2871,11 +2871,11 @@ class BusFactorMetric(Metric):
             except Exception:
                 logger.info("Grok fallback failed; using default bus factor",
                             exc_info=True)
-                eff = 0.5
+                eff = 2.0
         else:
             # Without Grok, adhere to the documented constant fallback.
             logger.info("No Grok client available; using default bus factor")
-            eff = 0.5
+            eff = 2.0
 
         score = max(0.0, min(1.0, eff / float(target)))
         logger.info("Bus factor final score: %.2f (eff=%.2f target=%d)",
