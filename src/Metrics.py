@@ -331,7 +331,7 @@ class RampUpTime(Metric):
 
         if not page_text:
             logger.debug("Empty model card text; defaulting LLM ramp score")
-            return 0.5
+            return 0
 
         # Restrict context to remain under typical LLM limits while keeping
         # enough substance for a meaningful judgement.

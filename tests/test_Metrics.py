@@ -1483,7 +1483,7 @@ class TestRampUpTimeHelpers(unittest.TestCase):
 
         score = RampUpTime._llm_ramp_rating(metric, "")
 
-        self.assertEqual(score, 0.5)
+        self.assertEqual(score, 0.0)
         grok_mock.llm.assert_not_called()
 
     def test_llm_ramp_rating_parses_score(self) -> None:
