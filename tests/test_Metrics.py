@@ -414,7 +414,7 @@ class TestLicenseMetric(unittest.TestCase):
         inputs = {"model_url": "https://huggingface.co/acme/model"}
         score = metric.compute(inputs)
 
-        self.assertEqual(score, 0.5)
+        self.assertEqual(score, 0.1)
         mock_grok_client_cls.return_value.llm.assert_not_called()
 
     @patch("src.Metrics.time.sleep")
@@ -437,7 +437,7 @@ class TestLicenseMetric(unittest.TestCase):
         inputs = {"model_url": "https://huggingface.co/acme/model"}
         score = metric.compute(inputs)
 
-        self.assertEqual(score, 0.5)
+        self.assertEqual(score, 0.1)
         mock_grok_client_cls.return_value.llm.assert_not_called()
 
 
@@ -694,6 +694,25 @@ class TestBusFactorMetric(unittest.TestCase):
             grok_client=metric.grok,
         )
         self.assertAlmostEqual(score, 3.5 / 5.0)
+
+    @patch.object(BusFactorMetric, "_estimate_bus_factor_with_grok",
+                  side_effect=RuntimeError("grok fail"))
+    @patch.object(BusFactorMetric, "_fetch_hf_commits", return_value=[])
+    @patch.object(BusFactorMetric, "github_commit_counts", return_value={})
+    def test_default_fallback_returns_low_score(
+        self,
+        _mock_commit_counts: MagicMock,
+        _mock_fetch: MagicMock,
+        _mock_estimate: MagicMock,
+    ) -> None:
+        metric = BusFactorMetric(hf_client=MagicMock(),
+                                 grok_client=MagicMock())
+
+        score = metric.compute(
+            {"model_url": "https://huggingface.co/org/model"}
+        )
+
+        self.assertAlmostEqual(score, 0.5 / 5.0)
 
 
 class TestDatasetQualityMetric(unittest.TestCase):
