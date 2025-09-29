@@ -274,10 +274,9 @@ class RampUpTime(Metric):
         usage_text = self._extract_usage_section(full_page_text or "")
 
         usage_available = bool(usage_text and usage_text.strip())
-        usage_char_count: Optional[int] = None
         if usage_available and usage_text is not None:
-            usage_char_count = len(usage_text)
-            logger.debug("Usage text length for %s: %d", url, usage_char_count)
+            char_count = len(usage_text)
+            logger.debug("Usage text length for %s: %d", url, char_count)
         else:
             lowered = (full_page_text or "").lower()
             keywords = (
@@ -302,16 +301,7 @@ class RampUpTime(Metric):
                     url,
                 )
         if usage_available:
-            if usage_char_count is not None and usage_char_count > 0:
-                # Short, focused instructions imply faster ramp-up; scale the
-                # score inversely with snippet length while keeping it within
-                # a reasonable band.
-                reference = 600.0
-                usage_score = max(0.2, min(1.0, reference / usage_char_count))
-            else:
-                # Keyword heuristics found evidence but we could not isolate
-                # the text; treat as partially helpful documentation.
-                usage_score = 0.6
+            usage_score = 1.0
         elif fetch_failed:
             usage_score = 0.5
         else:
@@ -328,7 +318,7 @@ class RampUpTime(Metric):
         score = (usage_score + llm_score) / 2.0
 
         logger.info(
-            "Ramp-up score (%s): usage_score=%.3f llm_scores=%s combined=%.3f",
+            "Ramp-up score for %s: usage=%s llm_scores=%s combined=%.3f",
             url,
             usage_score,
             llm_scores,
@@ -1909,12 +1899,11 @@ class CodeQuality(Metric):
             card_text = self._model_card_text(model_url)
         # No code: fall back to evaluating the model card itself for quality
         # signals so the metric still returns a bounded value.
-        fallback_score = self._llm_card_rating(card_text, code_missing=True)
+        fallback_score = self._llm_card_rating(card_text)
         self.last_details = {
             "origin": "model_card",
             "llm_score": fallback_score,
             "card_available": bool(card_text),
-            "code_missing": True,
         }
         logger.info("Code quality fallback score: %.2f", fallback_score)
         return fallback_score
@@ -2306,10 +2295,7 @@ class CodeQuality(Metric):
             logger.info("LLM code rating failed", exc_info=True)
             return 0.5
 
-    def _llm_card_rating(self,
-                         card_text: str,
-                         *,
-                         code_missing: bool = False) -> float:
+    def _llm_card_rating(self, card_text: str) -> float:
         """
         Generate a fallback LLM-based quality score from model card text.
 
@@ -2321,13 +2307,13 @@ class CodeQuality(Metric):
         Returns
         -------
         float
-            Parsed LLM rating in ``[0.0, 1.0]``; defaults to ``0.1`` on
-            failure or missing text.
+            Parsed LLM rating in ``[0.0, 1.0]``; defaults to ``0.3`` on
+            failure.
         """
 
         if not card_text:
-            logger.debug("No card text; defaulting LLM card rating to 0.1")
-            return 0.1
+            logger.debug("No card text; defaulting LLM card rating to 0.3")
+            return 0.3
 
         prompt = (
             "Based on this Hugging Face model card, estimate the quality "
@@ -2337,14 +2323,6 @@ class CodeQuality(Metric):
             "summarizes your judgement.\n\n"
             f"{shorten(card_text, width=3500, placeholder='...')}"
         )
-
-        if code_missing:
-            prompt += (
-                "\n\nImportant: No source code repository or downloadable "
-                "project files were found. Unless the card provides strong "
-                "evidence of testing and engineering practices, assign a low "
-                "score."
-            )
 
         def call() -> Any:
             return self.grok.llm(prompt)
@@ -2359,7 +2337,7 @@ class CodeQuality(Metric):
             return score
         except Exception:
             logger.info("LLM card rating failed", exc_info=True)
-            return 0.1
+            return 0.3
 
     def _code_snippet(
         self,
