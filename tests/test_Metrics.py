@@ -275,6 +275,26 @@ class TestRampUpTimeMetric(unittest.TestCase):
         self.assertEqual(mock_llm.call_count, RAMP_UP_LLM_ATTEMPTS)
         self.assertGreaterEqual(score, 0.5)
 
+    @patch.object(RampUpTime, "_llm_ramp_rating", return_value=0.2)
+    @patch("src.Metrics.injectHFBrowser")
+    @patch.object(RampUpTime, "_extract_usage_section")
+    def test_compute_penalizes_very_long_usage_snippet(
+        self,
+        mock_extract: MagicMock,
+        mock_inject: MagicMock,
+        _mock_llm: MagicMock,
+    ) -> None:
+        metric = RampUpTime()
+        mock_inject.return_value = "full page text"
+        mock_extract.return_value = "Step\n" * 1200
+
+        score = metric.compute(
+            {"model_url": "https://huggingface.co/acme/model"}
+        )
+
+        mock_extract.assert_called_once_with("full page text")
+        self.assertLess(score, 0.35)
+
     def test_extract_usage_section_strips_result(self) -> None:
         metric = RampUpTime.__new__(RampUpTime)
         metric.grok = MagicMock()
@@ -928,11 +948,12 @@ class TestCodeQualityMetric(unittest.TestCase):
                 "origin": "model_card",
                 "llm_score": 0.42,
                 "card_available": True,
+                "code_missing": True,
             },
         )
         mock_load.assert_called_once_with(inputs)
         mock_card.assert_called_once_with(inputs["model_url"])
-        mock_llm.assert_called_once_with("card text")
+        mock_llm.assert_called_once_with("card text", code_missing=True)
 
     def test_load_code_prefers_git_url(self) -> None:
         metric = CodeQuality(hf_client=MagicMock(), grok_client=MagicMock())
@@ -1181,7 +1202,7 @@ class TestCodeQualityMetric(unittest.TestCase):
 
         score = metric._llm_card_rating("")
 
-        self.assertEqual(score, 0.3)
+        self.assertEqual(score, 0.1)
         llm_mock.assert_not_called()
 
     def test_llm_card_rating_uses_parse_helper(self) -> None:
@@ -1210,7 +1231,7 @@ class TestCodeQualityMetric(unittest.TestCase):
 
         score = metric._llm_card_rating("card text")
 
-        self.assertEqual(score, 0.3)
+        self.assertEqual(score, 0.1)
         self.assertEqual(grok_mock.llm.call_count, LLM_MAX_ATTEMPTS)
 
     def test_model_card_text_prefers_hf_api_bytes(self) -> None:
