@@ -1,6 +1,5 @@
 import json
 import unittest
-from typing import cast
 from unittest.mock import patch
 
 from src.Display import (_extract_model_name, _get_value_latency,
@@ -60,17 +59,17 @@ class TestDisplayHelpers(unittest.TestCase):
         self.assertEqual(out["name"], "model")
         size_avg = (0.4 + 0.5 + 0.6 + 0.7) / 4
         expected_net = sum([
-            0.2 * 0.8,
-            0.15 * 0.9,
-            0.1 * size_avg,
-            0.1 * 0.7,
-            0.1 * 0.6,
-            0.15 * 0.5,
-            0.1 * 0.4,
-            0.1 * 0.3,
-        ])
+            0.8,
+            0.9,
+            size_avg,
+            0.7,
+            0.6,
+            0.5,
+            0.4,
+            0.3,
+        ]) / 8
         self.assertAlmostEqual(out["net_score"], expected_net)
-        expected_latency = max([10, 5, 8, 4, 6, 7, 9, 3])
+        expected_latency = 10 + 5 + 8 + 4 + 6 + 7 + 9 + 3
         self.assertEqual(out["net_score_latency"], expected_latency)
         self.assertEqual(out["ramp_up_time"], 0.8)
         self.assertEqual(out["size_score"]["jetson_nano"], 0.5)
@@ -107,7 +106,7 @@ class TestDisplayHelpers(unittest.TestCase):
                 "desktop_pc": 1.2,
                 "aws_server": "0.7",
             },
-            cast(float, "15"),
+            15,
         )
 
         values, latency = _get_value_latency(
@@ -129,7 +128,7 @@ class TestDisplayHelpers(unittest.TestCase):
     def test_build_output_object_handles_scalar_size_metric(self) -> None:
         results = [
             MetricResult("Ramp", "ramp_up_time", 0.9, 10),
-            MetricResult("Size", "size_metric", 0.42, cast(float, "11")),
+            MetricResult("Size", "size_metric", 0.42, 11),
         ]
 
         out = build_output_object({}, results)
@@ -145,8 +144,8 @@ class TestDisplayHelpers(unittest.TestCase):
             },
         )
         self.assertEqual(out["size_score_latency"], 11)
-        self.assertEqual(out["net_score_latency"], 11)
-        expected_net = (0.2 * 0.9) + (0.1 * 0.42)
+        self.assertEqual(out["net_score_latency"], 21)
+        expected_net = (0.9 + 0.42) / 8
         self.assertAlmostEqual(out["net_score"], expected_net)
         self.assertEqual(out["bus_factor"], 0.0)
         self.assertEqual(out["performance_claims"], 0.0)

@@ -88,25 +88,27 @@ def build_output_object(group: Dict[str, str], results: List[MetricResult]) \
             return sum(values) / len(values)
         return float(value)
 
-    components = [
-        0.2 * _score_mean(ramp_val),
-        0.15 * _score_mean(lic_val),
-        0.1 * _score_mean(size_val),
-        0.1 * _score_mean(avail_val),
-        0.1 * _score_mean(dquality_val),
-        0.15 * _score_mean(cquality_val),
-        0.1 * _score_mean(pclaim_val),
-        0.1 * _score_mean(bfact_val),
+    component_values = [
+        _score_mean(ramp_val),
+        _score_mean(lic_val),
+        _score_mean(size_val),
+        _score_mean(avail_val),
+        _score_mean(dquality_val),
+        _score_mean(cquality_val),
+        _score_mean(pclaim_val),
+        _score_mean(bfact_val),
     ]
-    net_val = sum(components)
-    net_lat = sum(ramp_lat,
-                  lic_lat,
-                  avail_lat,
-                  size_lat,
-                  dquality_lat,
-                  cquality_lat,
-                  pclaim_lat,
-                  bfact_lat)
+    net_val = sum(component_values) / len(component_values)
+    net_lat = (
+        ramp_lat
+        + lic_lat
+        + avail_lat
+        + size_lat
+        + dquality_lat
+        + cquality_lat
+        + pclaim_lat
+        + bfact_lat
+    )
 
     # Size score as multi-device object to match expected shape
     size_keys = ["raspberry_pi", "jetson_nano", "desktop_pc", "aws_server"]
