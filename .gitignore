@@ -5,3 +5,8 @@
 .env.*
 !.env.example
 *.log
+.terraform/
+*.tfstate
+*.tfstate.backup
+crash.log
+*.tfvars
