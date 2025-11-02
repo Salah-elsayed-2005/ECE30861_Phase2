@@ -1,5 +1,3 @@
-# src/CLIApp.py
-# THIS CODE WILL HANDLE THE HIGH LEVEL LOGIC OF THE APP
 import os
 import sys
 from pathlib import Path
