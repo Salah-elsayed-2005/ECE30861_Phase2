@@ -1,8 +1,20 @@
+# Phase 1 dependencies (inherited)
 requests
 groq
-pytest-cov
+beautifulsoup4
+python-dotenv
+
+# Phase 2 dependencies (REST API + AWS)
+fastapi==0.104.1
+starlette==0.27.0
+mangum==0.17.0
+boto3==1.28.85
+pydantic==2.5.0
+
+# Testing & Quality
+pytest==7.4.3
+pytest-cov==4.1.0
 flake8
 mypy
 types-requests
-python-dotenv
-beautifulsoup4
+httpx==0.25.2
