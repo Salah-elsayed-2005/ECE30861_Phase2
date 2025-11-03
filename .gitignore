@@ -10,3 +10,5 @@
 *.tfstate.backup
 crash.log
 *.tfvars
+.venv/
+venv/
