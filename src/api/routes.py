@@ -67,6 +67,21 @@ def _validate_session_in_memory(token: str) -> Optional[str]:
         return None
     return entry.get("username")
 
+
+# Seed default admin required by autograder
+# Username: ece30861defaultadminuser
+# Password: 'correcthorsebatterystaple123(!__+@**(A;DROP TABLE packages'
+_DEFAULT_ADMIN_USERNAME = os.getenv('DEFAULT_ADMIN_USERNAME', 'ece30861defaultadminuser')
+_DEFAULT_ADMIN_PASSWORD = os.getenv('DEFAULT_ADMIN_PASSWORD', "correcthorsebatterystaple123(!__+@**(A;DROP TABLE packages)")
+
+try:
+    if _get_user_in_memory(_DEFAULT_ADMIN_USERNAME) is None:
+        _create_user_in_memory(_DEFAULT_ADMIN_USERNAME, _DEFAULT_ADMIN_PASSWORD)
+        print(f"Default admin user '{_DEFAULT_ADMIN_USERNAME}' seeded (in-memory).")
+except Exception:
+    # Don't crash app startup if seeding fails (e.g., user exists)
+    pass
+
 @app.get("/api/v1/health")
 def health():
     """Health check endpoint"""
