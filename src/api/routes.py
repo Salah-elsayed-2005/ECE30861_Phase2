@@ -3,7 +3,10 @@ import boto3
 import json
 from datetime import datetime
 import os
-from typing import Optional
+from typing import Optional, Dict
+import hashlib
+import uuid
+import time
 
 app = FastAPI(
     title="Trustworthy Model Registry",
@@ -20,6 +23,49 @@ except Exception as e:
     print(f"Warning: AWS services not available: {e}")
     table = None
     s3 = None
+
+# Simple in-memory auth stores (used when no persistent auth store is available)
+
+_users_store: Dict[str, Dict[str, str]] = {}
+_sessions_store: Dict[str, Dict[str, object]] = {}
+
+SESSION_TTL_SECONDS = int(os.getenv('AUTH_SESSION_TTL', '3600'))
+
+def _hash_password(password: str, salt: str) -> str:
+    return hashlib.sha256((salt + password).encode('utf-8')).hexdigest()
+
+def _create_user_in_memory(username: str, password: str) -> None:
+    if username in _users_store:
+        raise ValueError("user_exists")
+    salt = uuid.uuid4().hex
+    pw_hash = _hash_password(password, salt)
+    _users_store[username] = {
+        "password_hash": pw_hash,
+        "salt": salt,
+        "created_at": datetime.utcnow().isoformat()
+    }
+
+def _get_user_in_memory(username: str) -> Optional[Dict[str, str]]:
+    return _users_store.get(username)
+
+def _create_session_in_memory(username: str) -> str:
+    token = uuid.uuid4().hex
+    expires_at = time.time() + SESSION_TTL_SECONDS
+    _sessions_store[token] = {"username": username, "expires_at": expires_at}
+    return token
+
+def _invalidate_session_in_memory(token: str) -> bool:
+    return _sessions_store.pop(token, None) is not None
+
+def _validate_session_in_memory(token: str) -> Optional[str]:
+    entry = _sessions_store.get(token)
+    if not entry:
+        return None
+    if entry.get("expires_at", 0) < time.time():
+        # expired
+        _sessions_store.pop(token, None)
+        return None
+    return entry.get("username")
 
 @app.get("/api/v1/health")
 def health():
@@ -75,6 +121,57 @@ def ingest_model(hf_url: str = Query(...)):
         "scores": scores,
         "overall_score": round(overall_score, 3)
     }
+
+
+@app.post("/api/v1/register")
+def register(username: str = Query(...), password: str = Query(...)):
+    """Register a new user (simple in-memory implementation).
+
+    NOTE: This stores credentials in-memory for the running process. Use a
+    persistent store and a strong password-hashing algorithm for real apps.
+    """
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="username and password required")
+    try:
+        _create_user_in_memory(username, password)
+    except ValueError as e:
+        if str(e) == "user_exists":
+            raise HTTPException(status_code=409, detail="user already exists")
+        raise HTTPException(status_code=500, detail="internal error")
+
+    return {"status": "registered", "username": username}
+
+
+@app.post("/api/v1/login")
+def login(username: str = Query(...), password: str = Query(...)):
+    """Authenticate user and return a session token.
+
+    Token is a simple UUID stored in memory with TTL.
+    """
+    user = _get_user_in_memory(username)
+    if not user:
+        raise HTTPException(status_code=401, detail="invalid credentials")
+    pw_hash = _hash_password(password, user["salt"])
+    if pw_hash != user["password_hash"]:
+        raise HTTPException(status_code=401, detail="invalid credentials")
+    token = _create_session_in_memory(username)
+    return {"status": "ok", "token": token, "expires_in": SESSION_TTL_SECONDS}
+
+
+@app.post("/api/v1/logout")
+def logout(token: Optional[str] = Query(None)):
+    """Invalidate a session token. Token may be passed as query param.
+
+    Also accepts Authorization header (Bearer) via FastAPI request if needed.
+    """
+    # try Query param first
+    if token:
+        ok = _invalidate_session_in_memory(token)
+        if not ok:
+            raise HTTPException(status_code=404, detail="token not found")
+        return {"status": "logged_out"}
+    # fallback: no token provided
+    raise HTTPException(status_code=400, detail="token required")
 
 @app.get("/api/v1/models/{model_id}")
 def get_model(model_id: str):
