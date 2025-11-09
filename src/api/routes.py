@@ -3,10 +3,16 @@ import boto3
 import json
 from datetime import datetime
 import os
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 import hashlib
 import uuid
 import time
+import subprocess
+import tempfile
+import logging
+
+# Add after the imports, before app = FastAPI()
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Trustworthy Model Registry",
@@ -188,29 +194,309 @@ def logout(token: Optional[str] = Query(None)):
     # fallback: no token provided
     raise HTTPException(status_code=400, detail="token required")
 
+# In-memory store for sensitive models
+_sensitive_models: Dict[str, Dict[str, str]] = {}
+# model_id -> {"js_program": str, "uploader_username": str, "created_at": str}
+
+# In-memory store for download history
+_download_history: List[Dict[str, object]] = []
+# [{"model_id": str, "downloader_username": str, "timestamp": str, "success": bool, "error": str}]
+
+def _get_username_from_token(token: Optional[str]) -> Optional[str]:
+    """Extract username from session token."""
+    if not token:
+        return None
+    return _validate_session_in_memory(token)
+
+def _execute_js_program(
+    js_program: str,
+    model_name: str,
+    uploader_username: str,
+    downloader_username: str,
+    zip_file_path: str
+) -> tuple[bool, str]:
+    """
+    Execute JavaScript monitoring program before allowing download.
+    
+    Returns:
+        tuple[bool, str]: (success, stdout/error_message)
+    """
+    # Check if Node.js is available
+    try:
+        result = subprocess.run(
+            ["node", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode != 0:
+            logger.warning("Node.js not available, bypassing JS check")
+            return True, "Node.js not available, check bypassed"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        logger.warning("Node.js not found or timeout, bypassing JS check")
+        return True, "Node.js not found, check bypassed"
+    
+    # Write JS program to temporary file
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode='w',
+            suffix='.js',
+            delete=False,
+            encoding='utf-8'
+        ) as js_file:
+            js_file.write(js_program)
+            js_file_path = js_file.name
+        
+        # Execute the JS program with required arguments
+        cmd = [
+            "node",
+            js_file_path,
+            model_name,
+            uploader_username,
+            downloader_username,
+            zip_file_path
+        ]
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        # Clean up temp file
+        try:
+            os.unlink(js_file_path)
+        except Exception:
+            pass
+        
+        success = result.returncode == 0
+        output = result.stdout if success else f"JS check failed: {result.stdout}\n{result.stderr}"
+        
+        return success, output
+        
+    except subprocess.TimeoutExpired:
+        return False, "JavaScript program execution timeout (30s)"
+    except Exception as e:
+        return False, f"Error executing JavaScript program: {str(e)}"
+
+
+@app.post("/api/v1/models/{model_id}/sensitive")
+def mark_model_sensitive(
+    model_id: str,
+    js_program: str = Query(..., description="JavaScript monitoring program"),
+    token: Optional[str] = Query(None, description="Authentication token")
+):
+    """
+    Mark a model as sensitive and associate a JavaScript monitoring program.
+    
+    The JS program will be executed before any download of this model.
+    Program format: Node.js v24 script accepting 4 args:
+    MODEL_NAME UPLOADER_USERNAME DOWNLOADER_USERNAME ZIP_FILE_PATH
+    """
+    # Authenticate user
+    username = _get_username_from_token(token)
+    if not username:
+        raise HTTPException(status_code=401, detail="authentication required")
+    
+    # Validate JS program is not empty
+    if not js_program or not js_program.strip():
+        raise HTTPException(status_code=400, detail="js_program cannot be empty")
+    
+    # Store sensitive model info
+    _sensitive_models[model_id] = {
+        "js_program": js_program,
+        "uploader_username": username,
+        "created_at": datetime.utcnow().isoformat(),
+        "updated_at": datetime.utcnow().isoformat()
+    }
+    
+    logger.info("Model %s marked as sensitive by %s", model_id, username)
+    
+    return {
+        "status": "success",
+        "model_id": model_id,
+        "message": "Model marked as sensitive with JS monitoring program"
+    }
+
+
+@app.get("/api/v1/models/{model_id}/sensitive")
+def get_sensitive_model_info(model_id: str):
+    """Get the JavaScript monitoring program for a sensitive model."""
+    if model_id not in _sensitive_models:
+        raise HTTPException(
+            status_code=404,
+            detail="Model is not marked as sensitive or does not exist"
+        )
+    
+    info = _sensitive_models[model_id]
+    return {
+        "model_id": model_id,
+        "js_program": info["js_program"],
+        "uploader_username": info["uploader_username"],
+        "created_at": info["created_at"],
+        "updated_at": info["updated_at"]
+    }
+
+
+@app.delete("/api/v1/models/{model_id}/sensitive")
+def remove_sensitive_flag(
+    model_id: str,
+    token: Optional[str] = Query(None, description="Authentication token")
+):
+    """Remove sensitive flag and associated JavaScript program from a model."""
+    # Authenticate user
+    username = _get_username_from_token(token)
+    if not username:
+        raise HTTPException(status_code=401, detail="authentication required")
+    
+    if model_id not in _sensitive_models:
+        raise HTTPException(
+            status_code=404,
+            detail="Model is not marked as sensitive"
+        )
+    
+    # Check if user is the uploader or admin
+    model_info = _sensitive_models[model_id]
+    if model_info["uploader_username"] != username and username != _DEFAULT_ADMIN_USERNAME:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the uploader or admin can remove sensitive flag"
+        )
+    
+    del _sensitive_models[model_id]
+    
+    logger.info("Model %s sensitive flag removed by %s", model_id, username)
+    
+    return {
+        "status": "success",
+        "model_id": model_id,
+        "message": "Sensitive flag removed"
+    }
+
+
+@app.get("/api/v1/models/{model_id}/download-history")
+def get_download_history(
+    model_id: str,
+    token: Optional[str] = Query(None, description="Authentication token")
+):
+    """Get download history for a sensitive model."""
+    # Authenticate user
+    username = _get_username_from_token(token)
+    if not username:
+        raise HTTPException(status_code=401, detail="authentication required")
+    
+    # Check if model is sensitive
+    if model_id not in _sensitive_models:
+        raise HTTPException(
+            status_code=404,
+            detail="Model is not marked as sensitive"
+        )
+    
+    # Filter history for this model
+    history = [
+        entry for entry in _download_history
+        if entry["model_id"] == model_id
+    ]
+    
+    return {
+        "model_id": model_id,
+        "download_count": len(history),
+        "downloads": history
+    }
+
+
+# Update existing get_model endpoint to handle sensitive downloads
 @app.get("/api/v1/models/{model_id}")
-def get_model(model_id: str):
+def get_model(model_id: str, token: Optional[str] = Query(None)):
     """Retrieve a specific model by ID"""
     return {
         "model_id": model_id,
         "status": "found",
-        "message": "Model retrieved successfully"
+        "message": "Model retrieved successfully",
+        "is_sensitive": model_id in _sensitive_models
     }
 
-@app.delete("/api/v1/models/{model_id}")
-def delete_model(model_id: str):
-    """Delete a model from registry"""
+
+@app.get("/api/v1/models/{model_id}/download")
+def download_model(
+    model_id: str,
+    token: Optional[str] = Query(None, description="Authentication token")
+):
+    """
+    Download a model. If sensitive, executes JS monitoring program first.
+    """
+    # Authenticate user
+    username = _get_username_from_token(token)
+    if not username:
+        raise HTTPException(status_code=401, detail="authentication required")
+    
+    # Check if model is sensitive
+    if model_id in _sensitive_models:
+        model_info = _sensitive_models[model_id]
+        js_program = model_info["js_program"]
+        uploader_username = model_info["uploader_username"]
+        
+        # Create temporary zip file path for JS program argument
+        # In production, this would be actual S3 path or local file
+        temp_zip_path = f"/tmp/{model_id}.zip"
+        
+        # Execute JS monitoring program
+        success, output = _execute_js_program(
+            js_program=js_program,
+            model_name=model_id,
+            uploader_username=uploader_username,
+            downloader_username=username,
+            zip_file_path=temp_zip_path
+        )
+        
+        # Record download attempt
+        history_entry = {
+            "model_id": model_id,
+            "downloader_username": username,
+            "timestamp": datetime.utcnow().isoformat(),
+            "success": success,
+            "error": None if success else output
+        }
+        _download_history.append(history_entry)
+        
+        if not success:
+            logger.warning(
+                "Sensitive model %s download blocked for %s: %s",
+                model_id,
+                username,
+                output
+            )
+            raise HTTPException(
+                status_code=403,
+                detail=f"Download rejected by monitoring program: {output}"
+            )
+        
+        logger.info(
+            "Sensitive model %s download approved for %s",
+            model_id,
+            username
+        )
+    
+    # In production, return actual file or S3 presigned URL
     return {
-        "status": "deleted",
+        "status": "success",
         "model_id": model_id,
-        "message": "Model deleted successfully"
+        "message": "Download authorized",
+        "download_url": f"https://example.com/models/{model_id}.zip",
+        "note": "In production, this would be actual download URL or file stream"
     }
+
 
 @app.post("/api/v1/reset")
 def reset_registry():
     """Reset all models (for testing only)"""
+    global _sensitive_models, _download_history
+    _sensitive_models.clear()
+    _download_history.clear()
+    
     return {
         "status": "reset",
         "deleted": 0,
-        "message": "Registry reset successfully"
+        "message": "Registry reset successfully (including sensitive models)"
     }
