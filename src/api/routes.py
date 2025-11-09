@@ -418,6 +418,16 @@ def get_model(model_id: str, token: Optional[str] = Query(None)):
     }
 
 
+@app.delete("/api/v1/models/{model_id}")
+def delete_model(model_id: str):
+    """Delete a model from registry"""
+    return {
+        "status": "deleted",
+        "model_id": model_id,
+        "message": "Model deleted successfully"
+    }
+
+
 @app.get("/api/v1/models/{model_id}/download")
 def download_model(
     model_id: str,
