@@ -98,31 +98,65 @@ def health():
         "version": "1.0"
     }
 
-@app.get("/api/v1/models")
-def list_models(limit: int = Query(10), skip: int = Query(0)):
-    """List all models in registry"""
-    return {
-        "models": [],
-        "count": 0,
-        "message": "Local mode - no database"
-    }
+# In-memory artifact storage
+_artifacts_store: Dict[str, Dict[str, object]] = {}
+# artifact_id -> {"name": str, "type": str, "url": str, "scores": dict, "uploaded_at": str}
 
-@app.post("/api/v1/models/upload")
-def upload_model(model_id: str = Query(...), name: str = Query(...), description: Optional[str] = Query(None)):
-    """Upload a new model to registry"""
+def _generate_artifact_id(name: str, artifact_type: str) -> str:
+    """Generate a unique artifact ID"""
+    timestamp = datetime.utcnow().isoformat()
+    unique_str = f"{name}_{artifact_type}_{timestamp}"
+    return hashlib.md5(unique_str.encode()).hexdigest()[:12]
+
+def _determine_artifact_type(url: str) -> str:
+    """Determine artifact type from HuggingFace URL"""
+    url_lower = url.lower()
+    if "/datasets/" in url_lower:
+        return "dataset"
+    elif "/spaces/" in url_lower:
+        return "code"
+    else:
+        return "model"
+
+@app.get("/api/v1/models")
+def list_models(
+    limit: int = Query(10),
+    skip: int = Query(0),
+    type: Optional[str] = Query(None, description="Filter by artifact type: model, dataset, or code")
+):
+    """List all artifacts in registry with optional type filtering"""
+    # Filter artifacts by type if specified
+    artifacts = list(_artifacts_store.values())
+    
+    if type:
+        artifacts = [a for a in artifacts if a.get("type") == type]
+    
+    # Apply pagination
+    total = len(artifacts)
+    paginated = artifacts[skip:skip + limit]
+    
     return {
-        "status": "success",
-        "model_id": model_id,
-        "message": "Model uploaded successfully"
+        "models": paginated,
+        "count": total,
+        "limit": limit,
+        "skip": skip,
+        "message": "Artifacts retrieved successfully"
     }
 
 @app.post("/api/v1/models/ingest")
 def ingest_model(hf_url: str = Query(...)):
     """Ingest model from HuggingFace URL and compute metrics"""
-    parts = hf_url.split('/')
-    model_name = parts[-1] if parts else "unknown"
-    model_id = f"hf-{model_name}"
+    # Extract artifact name from URL
+    parts = hf_url.rstrip('/').split('/')
+    artifact_name = parts[-1] if parts else "unknown"
     
+    # Determine artifact type
+    artifact_type = _determine_artifact_type(hf_url)
+    
+    # Generate unique ID
+    artifact_id = _generate_artifact_id(artifact_name, artifact_type)
+    
+    # Compute metrics (Phase 1 scores)
     scores = {
         "ramp_up_time": 0.75,
         "license": 0.80,
@@ -136,11 +170,38 @@ def ingest_model(hf_url: str = Query(...)):
     
     overall_score = sum(scores.values()) / len(scores) if scores else 0
     
+    # Check if ingestible (all non-latency metrics >= 0.5)
+    ingestible = all(score >= 0.5 for score in scores.values())
+    
+    if not ingestible:
+        return {
+            "status": "rejected",
+            "message": "Model does not meet minimum quality threshold (0.5 on all metrics)",
+            "scores": scores,
+            "overall_score": round(overall_score, 3)
+        }
+    
+    # Store the artifact
+    _artifacts_store[artifact_id] = {
+        "id": artifact_id,
+        "name": artifact_name,
+        "type": artifact_type,
+        "url": hf_url,
+        "scores": scores,
+        "overall_score": round(overall_score, 3),
+        "uploaded_at": datetime.utcnow().isoformat()
+    }
+    
+    logger.info("Ingested %s: %s (ID: %s)", artifact_type, artifact_name, artifact_id)
+    
     return {
         "status": "success",
-        "model_id": model_id,
+        "model_id": artifact_id,
+        "name": artifact_name,
+        "type": artifact_type,
         "scores": scores,
-        "overall_score": round(overall_score, 3)
+        "overall_score": round(overall_score, 3),
+        "message": f"{artifact_type.capitalize()} ingested successfully"
     }
 
 
@@ -501,11 +562,12 @@ def download_model(
 @app.post("/api/v1/reset")
 def reset_registry():
     """Reset all models (for testing only)"""
-    global _sensitive_models, _download_history, _users_store, _sessions_store
+    global _sensitive_models, _download_history, _users_store, _sessions_store, _artifacts_store
     _sensitive_models.clear()
     _download_history.clear()
     _users_store.clear()
     _sessions_store.clear()
+    _artifacts_store.clear()
     
     # Re-seed default admin after clearing
     try:
@@ -516,6 +578,6 @@ def reset_registry():
     
     return {
         "status": "reset",
-        "deleted": 0,
-        "message": "Registry reset successfully (including sensitive models and users)"
+        "deleted": len(_artifacts_store),
+        "message": "Registry reset successfully (including sensitive models, users, and artifacts)"
     }
