@@ -29,4 +29,21 @@ case "$1" in
     python3 -m src.CLIApp $1
     exit 0
     ;;
+  tracks)
+    # Return the planned tracks
+    echo '{"plannedTracks":["Access control track"]}'
+    exit 0
+    ;;
+  reset)
+    # Reset the registry - clear all data
+    # This would need to interact with your storage mechanism
+    if [ -d "./packages" ]; then
+        rm -rf ./packages/*
+    fi
+    if [ -f "./packages.json" ]; then
+        echo "[]" > ./packages.json
+    fi
+    echo "Registry is reset."
+    exit 0
+    ;;
 esac
