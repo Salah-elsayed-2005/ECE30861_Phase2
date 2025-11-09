@@ -491,12 +491,21 @@ def download_model(
 @app.post("/api/v1/reset")
 def reset_registry():
     """Reset all models (for testing only)"""
-    global _sensitive_models, _download_history
+    global _sensitive_models, _download_history, _users_store, _sessions_store
     _sensitive_models.clear()
     _download_history.clear()
+    _users_store.clear()
+    _sessions_store.clear()
+    
+    # Re-seed default admin after clearing
+    try:
+        if _get_user_in_memory(_DEFAULT_ADMIN_USERNAME) is None:
+            _create_user_in_memory(_DEFAULT_ADMIN_USERNAME, _DEFAULT_ADMIN_PASSWORD)
+    except Exception:
+        pass
     
     return {
         "status": "reset",
         "deleted": 0,
-        "message": "Registry reset successfully (including sensitive models)"
+        "message": "Registry reset successfully (including sensitive models and users)"
     }

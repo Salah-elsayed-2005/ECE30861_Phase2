@@ -65,8 +65,11 @@ class TestSensitiveModels:
     """Test sensitive model management functionality."""
     
     def setup_method(self):
-        """Setup for each test - login and get token."""
-        # Register and login
+        """Setup for each test - clear state and login."""
+        # Clear registry state before each test
+        client.post("/api/v1/reset")
+        
+        # Now register and login fresh user
         response = client.post(
             "/api/v1/register",
             params={"username": "testuser", "password": "testpass123"}
