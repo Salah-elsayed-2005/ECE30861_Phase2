@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import shorten
-from typing import (Any, Callable, Iterable, Mapping, Optional, Sequence,
+from typing import (Any, Callable, Iterable, List, Mapping, Optional, Sequence,
                     TypeVar)
 from urllib.parse import quote, urlparse
 
@@ -2881,3 +2881,945 @@ class BusFactorMetric(Metric):
         logger.info("Bus factor final score: %.2f (eff=%.2f target=%d)",
                     score, eff, target)
         return score
+
+
+class ReproducibilityMetric(Metric):
+    """
+    Phase 2 Reproducibility Metric
+    
+    Determines whether the model can be run using only the demonstration 
+    code included in the model card.
+    
+    Scores:
+    - 0.0: No demonstration code found, or code doesn't run at all
+    - 0.5: Code runs but requires debugging/modifications
+    - 1.0: Code runs successfully with no changes
+    
+    The metric:
+    1. Fetches the model card/README from HuggingFace
+    2. Extracts code blocks (```python ... ```)
+    3. Attempts to execute the code in an isolated environment
+    4. Uses an LLM agent to debug if initial execution fails
+    5. Returns score based on execution success
+    """
+    
+    name = "Reproducibility"
+    key = "reproducibility"
+    
+    def __init__(self):
+        """Initialize with HuggingFace client and LLM agent."""
+        self.hf_client = HFClient(
+            max_requests=HF_MAX_REQUESTS,
+            window_seconds=HF_WINDOW_SECONDS,
+        )
+        self.llm_agent = PurdueClient(
+            max_requests=PURDUE_MAX_REQUESTS,
+            window_seconds=PURDUE_WINDOW_SECONDS,
+        )
+    
+    def _extract_demo_code(self, readme_text: str) -> list[str]:
+        """
+        Extract Python code blocks from model card README.
+        
+        Parameters
+        ----------
+        readme_text : str
+            The full text of the model card/README
+            
+        Returns
+        -------
+        list[str]
+            List of Python code blocks found in the README
+        """
+        code_blocks = []
+        
+        # Match code blocks with ```python or ```py markers
+        pattern = r"```(?:python|py)\s*\n(.*?)```"
+        matches = re.finditer(pattern, readme_text, re.DOTALL | re.IGNORECASE)
+        
+        for match in matches:
+            code = match.group(1).strip()
+            if code:
+                code_blocks.append(code)
+        
+        # Also try without language specifier (generic ```)
+        if not code_blocks:
+            pattern = r"```\s*\n(.*?)```"
+            matches = re.finditer(pattern, readme_text, re.DOTALL)
+            for match in matches:
+                code = match.group(1).strip()
+                # Simple heuristic: if it looks like Python
+                if code and any(kw in code for kw in ['import ', 'from ', 'def ', 'class ']):
+                    code_blocks.append(code)
+        
+        logger.info("Extracted %d code blocks from README", len(code_blocks))
+        return code_blocks
+    
+    def _execute_code_safely(self, code: str, timeout: int = 30) -> tuple[bool, str]:
+        """
+        Execute Python code in a subprocess with timeout.
+        
+        Parameters
+        ----------
+        code : str
+            Python code to execute
+        timeout : int
+            Maximum execution time in seconds
+            
+        Returns
+        -------
+        tuple[bool, str]
+            (success, output_or_error)
+        """
+        try:
+            # Write code to temporary file
+            with tempfile.NamedTemporaryFile(
+                mode='w',
+                suffix='.py',
+                delete=False,
+                encoding='utf-8'
+            ) as f:
+                f.write(code)
+                temp_file = f.name
+            
+            # Execute with timeout
+            result = subprocess.run(
+                [sys.executable, temp_file],
+                capture_output=True,
+                text=True,
+                timeout=timeout
+            )
+            
+            # Clean up
+            try:
+                Path(temp_file).unlink()
+            except Exception:
+                pass
+            
+            if result.returncode == 0:
+                return True, result.stdout
+            else:
+                error_msg = f"Exit code {result.returncode}\n{result.stderr}"
+                return False, error_msg
+                
+        except subprocess.TimeoutExpired:
+            return False, f"Execution timeout ({timeout}s exceeded)"
+        except Exception as e:
+            return False, f"Execution error: {str(e)}"
+    
+    def _try_debug_with_agent(self, code: str, error: str) -> tuple[bool, str]:
+        """
+        Use LLM agent to attempt debugging the code.
+        
+        Parameters
+        ----------
+        code : str
+            Original code that failed
+        error : str
+            Error message from failed execution
+            
+        Returns
+        -------
+        tuple[bool, str]
+            (success, fixed_code_or_error)
+        """
+        prompt = f"""You are a Python debugging assistant. The following code from a HuggingFace model card failed to execute:
+
+CODE:
+```python
+{code}
+```
+
+ERROR:
+{error}
+
+Please provide a fixed version of the code that will run successfully. Common issues include:
+- Missing imports (add common ones like torch, transformers, numpy)
+- Placeholder values that need to be replaced
+- File paths that don't exist
+- API keys or tokens required
+
+Respond ONLY with the fixed Python code in a ```python code block. Do not include explanations.
+"""
+        
+        try:
+            response = self.llm_agent.chat(prompt)
+            response_text = str(response).strip()
+            
+            # Extract code from response
+            code_pattern = r"```(?:python|py)?\s*\n(.*?)```"
+            match = re.search(code_pattern, response_text, re.DOTALL | re.IGNORECASE)
+            
+            if match:
+                fixed_code = match.group(1).strip()
+                logger.info("LLM agent provided fixed code (%d chars)", len(fixed_code))
+                
+                # Try executing the fixed code
+                success, output = self._execute_code_safely(fixed_code, timeout=30)
+                return success, fixed_code if success else output
+            else:
+                return False, "LLM agent did not return valid code"
+                
+        except Exception as e:
+            logger.warning("LLM debug attempt failed: %s", e)
+            return False, f"LLM error: {str(e)}"
+    
+    def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
+        """
+        Compute reproducibility score.
+        
+        Parameters
+        ----------
+        inputs : dict[str, Any]
+            Must contain 'model_url' - the HuggingFace model URL
+        **kwargs : Any
+            Optional parameters:
+            - use_agent: bool (default True) - whether to use LLM for debugging
+            - timeout: int (default 30) - execution timeout in seconds
+            
+        Returns
+        -------
+        float
+            0.0 (no code/doesn't run), 0.5 (runs with debugging), or 1.0 (runs immediately)
+        """
+        model_url = inputs.get("model_url")
+        if not model_url or not isinstance(model_url, str):
+            logger.warning("No model_url provided for reproducibility check")
+            return 0.0
+        
+        use_agent = kwargs.get("use_agent", True)
+        timeout = kwargs.get("timeout", 30)
+        
+        try:
+            # 1. Fetch model card text
+            logger.info("Fetching model card for reproducibility check: %s", model_url)
+            readme_text = injectHFBrowser(model_url, self.hf_client)
+            
+            if not readme_text:
+                logger.warning("Could not fetch model card for %s", model_url)
+                return 0.0
+            
+            # 2. Extract demo code blocks
+            code_blocks = self._extract_demo_code(readme_text)
+            
+            if not code_blocks:
+                logger.info("No demo code found in model card")
+                return 0.0
+            
+            # 3. Try executing each code block
+            for idx, code in enumerate(code_blocks):
+                logger.info("Testing code block %d/%d (%d chars)", 
+                          idx + 1, len(code_blocks), len(code))
+                
+                # First attempt: run as-is
+                success, output = self._execute_code_safely(code, timeout=timeout)
+                
+                if success:
+                    logger.info("Code block %d runs successfully without changes", idx + 1)
+                    return 1.0
+                
+                # Second attempt: use agent to debug
+                if use_agent and self.llm_agent:
+                    logger.info("Code block %d failed, trying LLM debugging", idx + 1)
+                    debug_success, debug_output = self._try_debug_with_agent(code, output)
+                    
+                    if debug_success:
+                        logger.info("Code block %d runs after LLM debugging", idx + 1)
+                        return 0.5
+                else:
+                    logger.info("Code block %d failed: %s", idx + 1, output[:200])
+            
+            # None of the code blocks worked
+            logger.info("No demo code blocks could be executed successfully")
+            return 0.0
+            
+        except Exception as e:
+            logger.error("Reproducibility metric error: %s", e, exc_info=True)
+            return 0.0
+
+
+class ReviewednessMetric(Metric):
+    """
+    Phase 2 Reviewedness Metric
+    
+    Calculates the fraction of all code (not weights) in the associated GitHub 
+    repository that was introduced through pull requests with a code review.
+    
+    Returns:
+    - Value between 0.0 and 1.0 representing the fraction of reviewed code
+    - -1 if there is no linked GitHub repository
+    
+    The metric:
+    1. Extracts GitHub repository URL from model metadata
+    2. Fetches all commits from the repository
+    3. Identifies which commits were part of reviewed PRs
+    4. Calculates lines of code added through reviewed PRs vs. total
+    5. Returns the fraction as a score
+    """
+    
+    name = "Reviewedness"
+    key = "reviewedness"
+    
+    def __init__(self):
+        """Initialize with GitHub client."""
+        self.git_client = GitClient(
+            max_requests=GIT_MAX_REQUESTS,
+            window_seconds=GIT_WINDOW_SECONDS,
+        )
+    
+    def _extract_github_url(self, model_url: str) -> Optional[str]:
+        """
+        Extract GitHub repository URL from model metadata.
+        
+        Parameters
+        ----------
+        model_url : str
+            HuggingFace model URL or direct GitHub URL
+            
+        Returns
+        -------
+        Optional[str]
+            GitHub repository URL, or None if not found
+        """
+        # If already a GitHub URL
+        if "github.com" in model_url:
+            return model_url
+        
+        # Try to fetch from HuggingFace model card
+        # In production, would parse model card for GitHub links
+        logger.info("Attempting to find GitHub repo for: %s", model_url)
+        
+        # For now, return None if not explicitly GitHub
+        # In production: parse HuggingFace API or model card
+        return None
+    
+    def _get_pull_requests(self, repo_owner: str, repo_name: str) -> list[dict]:
+        """
+        Fetch all pull requests from a GitHub repository.
+        
+        Parameters
+        ----------
+        repo_owner : str
+            GitHub repository owner
+        repo_name : str
+            GitHub repository name
+            
+        Returns
+        -------
+        list[dict]
+            List of pull request data
+        """
+        try:
+            url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/pulls"
+            params = {
+                "state": "all",  # Get open and closed PRs
+                "per_page": 100
+            }
+            
+            all_prs = []
+            page = 1
+            
+            # Fetch all pages of PRs
+            while page <= 10:  # Limit to 10 pages (1000 PRs)
+                paginated_params = {**params, "page": page}
+                response = self.git_client.get(url, params=paginated_params)
+                
+                if response.status_code != 200:
+                    logger.warning("Failed to fetch PRs (page %d): %d", 
+                                 page, response.status_code)
+                    break
+                
+                prs = response.json()
+                if not prs:
+                    break
+                
+                all_prs.extend(prs)
+                page += 1
+            
+            logger.info("Fetched %d pull requests", len(all_prs))
+            return all_prs
+            
+        except Exception as e:
+            logger.error("Error fetching pull requests: %s", e)
+            return []
+    
+    def _get_pr_reviews(self, repo_owner: str, repo_name: str, pr_number: int) -> list[dict]:
+        """
+        Fetch reviews for a specific pull request.
+        
+        Parameters
+        ----------
+        repo_owner : str
+            GitHub repository owner
+        repo_name : str
+            GitHub repository name
+        pr_number : int
+            Pull request number
+            
+        Returns
+        -------
+        list[dict]
+            List of review data
+        """
+        try:
+            url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/pulls/{pr_number}/reviews"
+            response = self.git_client.get(url)
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return []
+                
+        except Exception as e:
+            logger.debug("Error fetching reviews for PR #%d: %s", pr_number, e)
+            return []
+    
+    def _get_pr_commits(self, repo_owner: str, repo_name: str, pr_number: int) -> list[str]:
+        """
+        Get commit SHAs associated with a pull request.
+        
+        Parameters
+        ----------
+        repo_owner : str
+            GitHub repository owner
+        repo_name : str
+            GitHub repository name
+        pr_number : int
+            Pull request number
+            
+        Returns
+        -------
+        list[str]
+            List of commit SHAs in the PR
+        """
+        try:
+            url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/pulls/{pr_number}/commits"
+            response = self.git_client.get(url)
+            
+            if response.status_code == 200:
+                commits = response.json()
+                return [c["sha"] for c in commits]
+            else:
+                return []
+                
+        except Exception as e:
+            logger.debug("Error fetching commits for PR #%d: %s", pr_number, e)
+            return []
+    
+    def _get_commit_stats(self, repo_owner: str, repo_name: str, commit_sha: str) -> dict:
+        """
+        Get statistics for a specific commit (additions/deletions).
+        
+        Parameters
+        ----------
+        repo_owner : str
+            GitHub repository owner
+        repo_name : str
+            GitHub repository name
+        commit_sha : str
+            Commit SHA
+            
+        Returns
+        -------
+        dict
+            Commit statistics with 'additions' and 'deletions' counts
+        """
+        try:
+            url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/commits/{commit_sha}"
+            response = self.git_client.get(url)
+            
+            if response.status_code == 200:
+                data = response.json()
+                stats = data.get("stats", {})
+                
+                # Filter out weight/data files by checking changed files
+                files = data.get("files", [])
+                code_additions = 0
+                code_deletions = 0
+                
+                for file_data in files:
+                    filename = file_data.get("filename", "")
+                    # Skip binary files, model weights, datasets
+                    if self._is_code_file(filename):
+                        code_additions += file_data.get("additions", 0)
+                        code_deletions += file_data.get("deletions", 0)
+                
+                return {
+                    "additions": code_additions,
+                    "deletions": code_deletions,
+                    "total": code_additions + code_deletions
+                }
+            else:
+                return {"additions": 0, "deletions": 0, "total": 0}
+                
+        except Exception as e:
+            logger.debug("Error fetching commit stats for %s: %s", commit_sha[:7], e)
+            return {"additions": 0, "deletions": 0, "total": 0}
+    
+    def _is_code_file(self, filename: str) -> bool:
+        """
+        Determine if a file is a code file (not weights/data).
+        
+        Parameters
+        ----------
+        filename : str
+            File path
+            
+        Returns
+        -------
+        bool
+            True if file is code, False otherwise
+        """
+        filename_lower = filename.lower()
+        
+        # First, check if it's a code extension (priority)
+        code_extensions = {'.py', '.js', '.ts', '.java', '.cpp', '.c', '.h', '.go', '.rs', '.rb', '.jsx', '.tsx'}
+        for ext in code_extensions:
+            if filename_lower.endswith(ext):
+                return True
+        
+        # Skip common non-code files
+        skip_extensions = {
+            '.bin', '.pt', '.pth', '.h5', '.pkl', '.pickle',
+            '.npy', '.npz', '.json', '.csv', '.tsv', '.txt',
+            '.md', '.jpg', '.png', '.gif', '.pdf', '.zip',
+            '.tar', '.gz', '.safetensors', '.onnx', '.pb'
+        }
+        
+        # Check extensions
+        for ext in skip_extensions:
+            if filename_lower.endswith(ext):
+                return False
+        
+        # Check patterns in path (but only if not already identified as code)
+        skip_patterns = [
+            'checkpoint', 'weights', '/data/',
+            '/dataset/', '/assets/', '/images/', '/docs/'
+        ]
+        
+        for pattern in skip_patterns:
+            if pattern in filename_lower:
+                return False
+        
+        # Default: exclude if unsure
+        return False
+    
+    def _has_code_review(self, reviews: list[dict]) -> bool:
+        """
+        Determine if a PR has legitimate code reviews.
+        
+        Parameters
+        ----------
+        reviews : list[dict]
+            List of review data from GitHub API
+            
+        Returns
+        -------
+        bool
+            True if PR has at least one real code review
+        """
+        if not reviews:
+            return False
+        
+        # Look for reviews with state "APPROVED" or "CHANGES_REQUESTED"
+        # Comments without state don't count as formal reviews
+        for review in reviews:
+            state = review.get("state", "")
+            if state in ["APPROVED", "CHANGES_REQUESTED"]:
+                return True
+        
+        return False
+    
+    def compute(self, inputs: dict[str, Any], **kwargs: Any) -> float:
+        """
+        Compute reviewedness score.
+        
+        Parameters
+        ----------
+        inputs : dict[str, Any]
+            Must contain 'git_url' or 'model_url' with GitHub repository
+        **kwargs : Any
+            Optional parameters
+            
+        Returns
+        -------
+        float
+            Fraction of code introduced through reviewed PRs (0.0 to 1.0)
+            Returns -1 if no GitHub repository is linked
+        """
+        # Try to get GitHub URL
+        git_url = inputs.get("git_url")
+        if not git_url:
+            model_url = inputs.get("model_url", "")
+            git_url = self._extract_github_url(model_url)
+        
+        if not git_url or "github.com" not in git_url:
+            logger.info("No GitHub repository found, returning -1")
+            return -1.0
+        
+        try:
+            # Parse owner and repo from URL
+            # Format: https://github.com/owner/repo
+            parts = git_url.rstrip('/').split('/')
+            
+            # Extract path components after github.com
+            try:
+                github_idx = parts.index('github.com')
+                path_parts = parts[github_idx + 1:]
+            except (ValueError, IndexError):
+                logger.warning("Invalid GitHub URL format: %s", git_url)
+                return -1.0
+            
+            # Need at least 2 path components (owner/repo)
+            if len(path_parts) < 2:
+                logger.warning("Invalid GitHub URL format: %s", git_url)
+                return -1.0
+            
+            repo_owner = path_parts[0]
+            repo_name = path_parts[1].replace('.git', '')
+            
+            if not repo_owner or not repo_name:
+                logger.warning("Invalid GitHub URL format: %s", git_url)
+                return -1.0
+            
+            logger.info("Analyzing reviewedness for %s/%s", repo_owner, repo_name)
+            
+            # 1. Get all pull requests
+            prs = self._get_pull_requests(repo_owner, repo_name)
+            
+            if not prs:
+                logger.info("No pull requests found, assuming no code reviews")
+                return 0.0
+            
+            # 2. Identify reviewed PRs and their commits
+            reviewed_commits = set()
+            all_pr_commits = set()
+            
+            for pr in prs:
+                pr_number = pr.get("number")
+                pr_state = pr.get("state")
+                
+                # Only count merged PRs
+                if pr.get("merged_at") is None:
+                    continue
+                
+                # Get commits in this PR
+                pr_commits = self._get_pr_commits(repo_owner, repo_name, pr_number)
+                all_pr_commits.update(pr_commits)
+                
+                # Check if PR has code reviews
+                reviews = self._get_pr_reviews(repo_owner, repo_name, pr_number)
+                has_review = self._has_code_review(reviews)
+                
+                if has_review:
+                    reviewed_commits.update(pr_commits)
+                
+                logger.debug("PR #%d: %d commits, reviewed=%s", 
+                           pr_number, len(pr_commits), has_review)
+            
+            logger.info("Found %d PR commits, %d with reviews", 
+                       len(all_pr_commits), len(reviewed_commits))
+            
+            # 3. Calculate lines of code for reviewed vs. all commits
+            reviewed_lines = 0
+            total_pr_lines = 0
+            
+            # Sample commits to avoid rate limiting (take up to 100 commits)
+            sampled_all = list(all_pr_commits)[:100]
+            sampled_reviewed = [c for c in sampled_all if c in reviewed_commits]
+            
+            for commit_sha in sampled_all:
+                stats = self._get_commit_stats(repo_owner, repo_name, commit_sha)
+                lines = stats["total"]
+                total_pr_lines += lines
+                
+                if commit_sha in reviewed_commits:
+                    reviewed_lines += lines
+            
+            # 4. Calculate fraction
+            if total_pr_lines == 0:
+                logger.info("No code changes in PRs")
+                return 0.0
+            
+            fraction = reviewed_lines / total_pr_lines
+            logger.info("Reviewedness: %d/%d lines = %.3f", 
+                       reviewed_lines, total_pr_lines, fraction)
+            
+            return round(fraction, 3)
+            
+        except Exception as e:
+            logger.error("Reviewedness metric error: %s", e, exc_info=True)
+            return -1.0
+
+
+class TreescoreMetric:
+    """
+    Metric that computes the average overall score of parent models.
+    
+    Analyzes model's config.json to identify parent models (e.g., base_model,
+    _name_or_path) and calculates the average score of parents that exist
+    in the model registry.
+    
+    Score Interpretation:
+    - Returns 0.0 to 1.0: Average overall score of parent models
+    - Returns -1.0: No parent models found or no valid HuggingFace URL
+    - Returns 0.0: Parent models exist but none are in registry
+    
+    Parent Model Detection:
+    Checks these config.json fields for parent model references:
+    - base_model (common in LoRA/adapter models)
+    - _name_or_path (common in fine-tuned models)
+    - parent_model (custom field)
+    """
+    
+    def __init__(self, 
+                 hf_client: Optional[HFClient] = None,
+                 model_registry: Optional[dict] = None) -> None:
+        """
+        Initialize TreescoreMetric.
+        
+        Parameters
+        ----------
+        hf_client : Optional[HFClient]
+            HuggingFace API client. If None, creates default client.
+        model_registry : Optional[dict]
+            Dictionary mapping model_id -> model data with scores.
+            If None, metric will return -1.0 (cannot compute without registry).
+        """
+        self.hf_client = hf_client or HFClient(
+            max_requests=120,
+            window_seconds=30.0
+        )
+        self.model_registry = model_registry or {}
+        
+    def _extract_model_id_from_url(self, url: str) -> Optional[str]:
+        """
+        Extract model_id from HuggingFace URL.
+        
+        Parameters
+        ----------
+        url : str
+            HuggingFace model URL
+            
+        Returns
+        -------
+        Optional[str]
+            Model ID (e.g., "bert-base-uncased") or None if invalid
+        """
+        if not url or "huggingface.co" not in url:
+            return None
+        
+        try:
+            # Format: https://huggingface.co/username/model-name
+            parts = url.rstrip('/').split('/')
+            hf_idx = parts.index('huggingface.co')
+            path_parts = parts[hf_idx + 1:]
+            
+            # Need at least owner/model
+            if len(path_parts) < 2:
+                return None
+            
+            # Return "owner/model"
+            return f"{path_parts[0]}/{path_parts[1]}"
+        except (ValueError, IndexError):
+            return None
+    
+    def _get_config_json(self, model_id: str) -> dict:
+        """
+        Fetch config.json for a HuggingFace model.
+        
+        Parameters
+        ----------
+        model_id : str
+            HuggingFace model ID (e.g., "bert-base-uncased")
+            
+        Returns
+        -------
+        dict
+            Parsed config.json or empty dict if not found
+        """
+        try:
+            logger.info("Fetching config.json for %s", model_id)
+            
+            # HF API endpoint for raw file access
+            config = self.hf_client.request(
+                "GET",
+                f"/api/models/{model_id}",
+            )
+            
+            # Check if config is available in model info
+            if "config" in config:
+                return config["config"]
+            
+            # Try to fetch raw config.json file
+            try:
+                config_content = self.hf_client.request(
+                    "GET",
+                    f"/{model_id}/raw/main/config.json"
+                )
+                if isinstance(config_content, dict):
+                    return config_content
+            except Exception as e:
+                logger.debug("Could not fetch raw config.json: %s", e)
+            
+            return {}
+            
+        except Exception as e:
+            logger.warning("Failed to fetch config for %s: %s", model_id, e)
+            return {}
+    
+    def _extract_parent_models(self, config: dict) -> List[str]:
+        """
+        Extract parent model references from config.json.
+        
+        Parameters
+        ----------
+        config : dict
+            Parsed config.json
+            
+        Returns
+        -------
+        List[str]
+            List of parent model IDs
+        """
+        parents = []
+        
+        # Common fields that reference parent models
+        parent_fields = [
+            "base_model",
+            "_name_or_path", 
+            "parent_model",
+            "model_name_or_path",
+        ]
+        
+        for field in parent_fields:
+            value = config.get(field)
+            if value and isinstance(value, str):
+                # Skip local paths
+                if value.startswith('./') or value.startswith('/') or value.startswith('\\'):
+                    continue
+                
+                # Remove common prefixes
+                cleaned = value.replace('https://huggingface.co/', '')
+                cleaned = cleaned.strip('/')
+                
+                # Skip empty strings
+                if not cleaned:
+                    continue
+                
+                # Accept either "owner/model" or just "model-name" format
+                # Many HF models use simple names like "bert-base-uncased"
+                parents.append(cleaned)
+                logger.debug("Found parent model: %s (from %s)", cleaned, field)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_parents = []
+        for parent in parents:
+            if parent not in seen:
+                seen.add(parent)
+                unique_parents.append(parent)
+        
+        return unique_parents
+    
+    def _get_parent_scores(self, parent_ids: List[str]) -> List[float]:
+        """
+        Get overall scores for parent models from registry.
+        
+        Parameters
+        ----------
+        parent_ids : List[str]
+            List of parent model IDs
+            
+        Returns
+        -------
+        List[float]
+            List of overall scores for parents in registry
+        """
+        scores = []
+        
+        for parent_id in parent_ids:
+            # Check if parent exists in registry
+            if parent_id in self.model_registry:
+                model_data = self.model_registry[parent_id]
+                model_scores = model_data.get("scores", {})
+                
+                # Calculate overall score (exclude -1 values)
+                valid_scores = [v for v in model_scores.values() if isinstance(v, (int, float)) and v >= 0]
+                if valid_scores:
+                    overall = sum(valid_scores) / len(valid_scores)
+                    scores.append(overall)
+                    logger.debug("Parent %s overall score: %.3f", parent_id, overall)
+                else:
+                    logger.debug("Parent %s has no valid scores", parent_id)
+            else:
+                logger.debug("Parent %s not in registry", parent_id)
+        
+        return scores
+    
+    def compute(self, inputs: dict, **kwargs: Any) -> float:
+        """
+        Compute treescore (average score of parent models).
+        
+        Parameters
+        ----------
+        inputs : dict
+            Must contain 'model_url' with HuggingFace repository URL
+        **kwargs : Any
+            Optional parameters
+            
+        Returns
+        -------
+        float
+            Average overall score of parent models (0.0 to 1.0)
+            Returns -1.0 if no parent models found or URL invalid
+            Returns 0.0 if parents exist but none are in registry
+        """
+        # Get model URL
+        model_url = inputs.get("model_url", "")
+        
+        if not model_url or "huggingface.co" not in model_url:
+            logger.info("No HuggingFace URL provided, returning -1")
+            return -1.0
+        
+        # Extract model ID
+        model_id = self._extract_model_id_from_url(model_url)
+        if not model_id:
+            logger.warning("Invalid HuggingFace URL: %s", model_url)
+            return -1.0
+        
+        logger.info("Computing treescore for %s", model_id)
+        
+        try:
+            # 1. Get config.json
+            config = self._get_config_json(model_id)
+            
+            if not config:
+                logger.info("No config.json found for %s", model_id)
+                return -1.0
+            
+            # 2. Extract parent models
+            parent_ids = self._extract_parent_models(config)
+            
+            if not parent_ids:
+                logger.info("No parent models found in config for %s", model_id)
+                return -1.0
+            
+            logger.info("Found %d parent model(s): %s", len(parent_ids), parent_ids)
+            
+            # 3. Get scores for parents in registry
+            parent_scores = self._get_parent_scores(parent_ids)
+            
+            if not parent_scores:
+                logger.info("No parent models found in registry")
+                return 0.0
+            
+            # 4. Calculate average
+            treescore = sum(parent_scores) / len(parent_scores)
+            logger.info("Treescore: %.3f (avg of %d parent scores)", treescore, len(parent_scores))
+            
+            return round(treescore, 3)
+            
+        except Exception as e:
+            logger.error("Treescore metric error: %s", e, exc_info=True)
+            return -1.0

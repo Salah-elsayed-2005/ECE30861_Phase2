@@ -14,6 +14,10 @@ import {
   DeleteCommandInput
 } from '@aws-sdk/lib-dynamodb';
 
+// Initialize DynamoDB client
+const client = new DynamoDBClient({ region: process.env.AWS_REGION || 'us-east-1' });
+const docClient = DynamoDBDocumentClient.from(client);
+
 /**
  * GET /tracks
  * Returns the planned tracks
@@ -76,36 +80,19 @@ export const resetRegistry = async (event: APIGatewayProxyEvent): Promise<APIGat
     if (scanResult.Items && scanResult.Items.length > 0) {
       for (const item of scanResult.Items) {
         const deleteParams: DeleteCommandInput = {
+          TableName: tableName,
+          Key: {
+            id: item.id,
+          },
+        };
+        await docClient.send(new DeleteCommand(deleteParams));
+      }
+    }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-};  }    };      body: JSON.stringify({ error: 'Failed to reset registry' })      },        'Access-Control-Allow-Origin': '*'        'Content-Type': 'application/json',      headers: {      statusCode: 500,    return {    console.error('Error resetting registry:', error);  } catch (error) {    };      body: JSON.stringify({ message: 'Registry reset successfully' })      },        'Access-Control-Allow-Origin': '*'        'Content-Type': 'application/json',      headers: {      statusCode: 200,    return {    }      }        await docClient.send(new DeleteCommand(deleteParams));        };          },            id: item.id,          Key: {          TableName: tableName,        'Content-Type': 'text/plain',
+    return {
+      statusCode: 200,
+      headers: {
+        'Content-Type': 'text/plain',
         'Access-Control-Allow-Origin': '*'
       },
       body: 'Registry is reset.'

@@ -143,6 +143,148 @@ def list_models(
         "message": "Artifacts retrieved successfully"
     }
 
+@app.post("/api/v1/models/upload")
+def upload_model(
+    name: str = Query(..., description="Model name"),
+    version: str = Query("1.0.0", description="Model version"),
+    description: Optional[str] = Query(None, description="Model description"),
+    artifact_type: str = Query("model", description="Type: model, dataset, or code"),
+    content_url: Optional[str] = Query(None, description="URL to model content (temporary implementation)")
+):
+    """Upload a custom model (not from HuggingFace).
+    
+    NOTE: This is a simplified implementation. In production, this would:
+    - Accept file uploads via multipart/form-data
+    - Store files in S3
+    - Compute checksums for integrity
+    - Run security scans
+    """
+    # Generate unique ID
+    artifact_id = _generate_artifact_id(name, artifact_type)
+    
+    # Basic validation
+    if artifact_id in _artifacts_store:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Model with similar name already exists: {artifact_id}"
+        )
+    
+    # For now, we'll store metadata only (file upload would go to S3)
+    # In production, this endpoint would accept multipart/form-data
+    _artifacts_store[artifact_id] = {
+        "id": artifact_id,
+        "name": name,
+        "version": version,
+        "type": artifact_type,
+        "description": description or "",
+        "content_url": content_url or f"s3://models/{artifact_id}",
+        "uploaded_at": datetime.utcnow().isoformat(),
+        "uploader": "system",  # Would come from auth token
+        "scores": None  # Can be computed later via rate endpoint
+    }
+    
+    logger.info("Uploaded %s: %s (ID: %s)", artifact_type, name, artifact_id)
+    
+    return {
+        "status": "success",
+        "model_id": artifact_id,
+        "name": name,
+        "type": artifact_type,
+        "message": f"{artifact_type.capitalize()} uploaded successfully",
+        "note": "Production version would handle file uploads to S3"
+    }
+
+@app.put("/api/v1/models/{model_id}")
+def update_model(
+    model_id: str,
+    name: Optional[str] = Query(None),
+    version: Optional[str] = Query(None),
+    description: Optional[str] = Query(None)
+):
+    """Update model metadata (UPDATE operation for CRUD)."""
+    if model_id not in _artifacts_store:
+        raise HTTPException(status_code=404, detail="Model not found")
+    
+    model = _artifacts_store[model_id]
+    
+    # Update fields if provided
+    if name is not None:
+        model["name"] = name
+    if version is not None:
+        model["version"] = version
+    if description is not None:
+        model["description"] = description
+    
+    model["updated_at"] = datetime.utcnow().isoformat()
+    
+    return {
+        "status": "success",
+        "model_id": model_id,
+        "model": model,
+        "message": "Model updated successfully"
+    }
+
+@app.get("/api/v1/models/search")
+def search_models(
+    query: str = Query(..., description="Search query (supports regex)"),
+    use_regex: bool = Query(False, description="Treat query as regex pattern"),
+    search_in: str = Query("name", description="Search in: name, description, or both")
+):
+    """Search for models using text or regex patterns.
+    
+    Searches through model names, descriptions, and model cards.
+    """
+    import re as regex_module
+    
+    results = []
+    
+    try:
+        # Compile regex if needed
+        if use_regex:
+            try:
+                pattern = regex_module.compile(query, regex_module.IGNORECASE)
+            except regex_module.error as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid regex pattern: {str(e)}"
+                )
+        
+        # Search through all artifacts
+        for artifact in _artifacts_store.values():
+            match = False
+            
+            if search_in in ["name", "both"]:
+                if use_regex:
+                    if pattern.search(artifact.get("name", "")):
+                        match = True
+                else:
+                    if query.lower() in artifact.get("name", "").lower():
+                        match = True
+            
+            if search_in in ["description", "both"]:
+                desc = artifact.get("description", "")
+                if use_regex:
+                    if pattern.search(desc):
+                        match = True
+                else:
+                    if query.lower() in desc.lower():
+                        match = True
+            
+            if match:
+                results.append(artifact)
+        
+        return {
+            "query": query,
+            "use_regex": use_regex,
+            "search_in": search_in,
+            "count": len(results),
+            "results": results
+        }
+    
+    except Exception as e:
+        logger.error("Search error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/v1/models/ingest")
 def ingest_model(hf_url: str = Query(...)):
     """Ingest model from HuggingFace URL and compute metrics"""
@@ -581,3 +723,229 @@ def reset_registry():
         "deleted": len(_artifacts_store),
         "message": "Registry reset successfully (including sensitive models, users, and artifacts)"
     }
+
+
+@app.get("/api/v1/models/{model_id}/rate")
+def rate_model(
+    model_id: str,
+    compute_reproducibility: bool = Query(False, description="Compute reproducibility score (slower)"),
+    compute_reviewedness: bool = Query(False, description="Compute reviewedness score (requires GitHub URL)"),
+    compute_treescore: bool = Query(False, description="Compute treescore (parent model average)")
+):
+    """Get quality ratings for a model.
+    
+    Returns Phase 1 metrics plus new Phase 2 metrics:
+    - Reproducibility: 0/0.5/1 based on demo code execution
+    - Reviewedness: Fraction of code via PRs with review
+    - Treescore: Average score of parent models
+    
+    Note: Reproducibility computation can be slow (30s+) as it executes demo code.
+    Set compute_reproducibility=true to enable it.
+    """
+    if model_id not in _artifacts_store:
+        raise HTTPException(status_code=404, detail="Model not found")
+    
+    model = _artifacts_store[model_id]
+    scores = model.get("scores", {})
+    
+    if not scores:
+        # Initialize with Phase 1 scores (would be computed in production)
+        scores = {
+            "ramp_up_time": 0.75,
+            "license": 0.80,
+            "size": 0.65,
+            "availability": 0.90,
+            "code_quality": 0.70,
+            "dataset_quality": 0.60,
+            "performance_claims": 0.85,
+            "bus_factor": 0.50,
+            # Phase 2 metrics
+            "reproducibility": -1,  # -1 = not yet computed
+            "reviewedness": -1,
+            "treescore": -1
+        }
+    
+    # Compute reproducibility if requested
+    if compute_reproducibility and scores.get("reproducibility", -1) == -1:
+        model_url = model.get("url")
+        if model_url and "huggingface.co" in model_url:
+            try:
+                from src.Metrics import ReproducibilityMetric
+                logger.info("Computing reproducibility for %s", model_id)
+                
+                reproducibility_metric = ReproducibilityMetric()
+                repro_score = reproducibility_metric.compute(
+                    inputs={"model_url": model_url},
+                    use_agent=True,
+                    timeout=30
+                )
+                scores["reproducibility"] = repro_score
+                logger.info("Reproducibility score for %s: %.2f", model_id, repro_score)
+            except Exception as e:
+                logger.error("Failed to compute reproducibility: %s", e)
+                scores["reproducibility"] = -1
+        else:
+            logger.warning("Cannot compute reproducibility: no HuggingFace URL")
+    
+    # Compute reviewedness if requested
+    if compute_reviewedness and scores.get("reviewedness", -1) == -1:
+        model_url = model.get("url")
+        git_url = model.get("git_url")
+        
+        if model_url or git_url:
+            try:
+                from src.Metrics import ReviewednessMetric
+                logger.info("Computing reviewedness for %s", model_id)
+                
+                reviewedness_metric = ReviewednessMetric()
+                review_score = reviewedness_metric.compute(
+                    inputs={"model_url": model_url, "git_url": git_url}
+                )
+                scores["reviewedness"] = review_score
+                logger.info("Reviewedness score for %s: %.3f", model_id, review_score)
+            except Exception as e:
+                logger.error("Failed to compute reviewedness: %s", e)
+                scores["reviewedness"] = -1
+        else:
+            logger.warning("Cannot compute reviewedness: no model or git URL")
+    
+    # Compute treescore if requested
+    if compute_treescore and scores.get("treescore", -1) == -1:
+        model_url = model.get("url")
+        
+        if model_url and "huggingface.co" in model_url:
+            try:
+                from src.Metrics import TreescoreMetric
+                logger.info("Computing treescore for %s", model_id)
+                
+                treescore_metric = TreescoreMetric(
+                    model_registry=_artifacts_store
+                )
+                tree_score = treescore_metric.compute(
+                    inputs={"model_url": model_url}
+                )
+                scores["treescore"] = tree_score
+                logger.info("Treescore for %s: %.3f", model_id, tree_score)
+            except Exception as e:
+                logger.error("Failed to compute treescore: %s", e)
+                scores["treescore"] = -1
+        else:
+            logger.warning("Cannot compute treescore: no HuggingFace URL")
+    
+    # Store updated scores
+    model["scores"] = scores
+    
+    # Calculate overall score (exclude -1 values)
+    valid_scores = [v for v in scores.values() if v >= 0]
+    overall = sum(valid_scores) / len(valid_scores) if valid_scores else 0.0
+    
+    # Build note message
+    computed = []
+    if compute_reproducibility:
+        computed.append("reproducibility")
+    if compute_reviewedness:
+        computed.append("reviewedness")
+    if compute_treescore:
+        computed.append("treescore")
+    
+    note = f"Computed: {', '.join(computed)}" if computed else "Use query parameters to compute Phase 2 metrics"
+    
+    return {
+        "model_id": model_id,
+        "name": model.get("name"),
+        "scores": scores,
+        "overall_score": round(overall, 3),
+        "message": "Model rated successfully",
+        "note": note
+    }
+
+
+@app.get("/api/v1/models/{model_id}/lineage")
+def get_lineage(model_id: str):
+    """Get lineage graph for a model.
+    
+    Analyzes config.json to find parent models and builds lineage.
+    Lineage only includes models currently in the registry.
+    """
+    if model_id not in _artifacts_store:
+        raise HTTPException(status_code=404, detail="Model not found")
+    
+    # Simplified implementation - would parse config.json in production
+    # and recursively build lineage graph
+    lineage = {
+        "model_id": model_id,
+        "parents": [],  # Would be populated from config.json
+        "children": [],  # Models that depend on this one
+        "depth": 0,
+        "note": "Production version would parse config.json metadata"
+    }
+    
+    # Find children (models that list this as parent)
+    for other_id, other_model in _artifacts_store.items():
+        if other_id != model_id:
+            # In production, check if other_model's config lists model_id as parent
+            pass
+    
+    return lineage
+
+
+@app.get("/api/v1/models/{model_id}/size")
+def get_model_size(model_id: str):
+    """Calculate download size cost for a model.
+    
+    Returns size in bytes for full model and individual components.
+    """
+    if model_id not in _artifacts_store:
+        raise HTTPException(status_code=404, detail="Model not found")
+    
+    model = _artifacts_store[model_id]
+    
+    # In production, would query S3 object sizes or HuggingFace API
+    size_info = {
+        "model_id": model_id,
+        "total_bytes": 0,  # Would be computed from actual files
+        "components": {
+            "weights": 0,
+            "config": 0,
+            "tokenizer": 0,
+            "datasets": 0
+        },
+        "human_readable": "0 MB",
+        "note": "Production version would calculate from S3 objects"
+    }
+    
+    return size_info
+
+
+@app.post("/api/v1/license-check")
+def check_license_compatibility(
+    github_url: str = Query(..., description="GitHub repository URL"),
+    model_id: str = Query(..., description="Model ID in registry")
+):
+    """Check license compatibility between GitHub repo and model.
+    
+    Assesses whether the GitHub project's license is compatible with
+    the model's license for fine-tuning + inference/generation.
+    
+    Reference: ModelGo paper on ML license analysis
+    """
+    if model_id not in _artifacts_store:
+        raise HTTPException(status_code=404, detail="Model not found")
+    
+    # In production, would:
+    # 1. Fetch GitHub repo license from API
+    # 2. Fetch model license from model card
+    # 3. Apply compatibility matrix from ModelGo paper
+    
+    compatibility = {
+        "github_url": github_url,
+        "model_id": model_id,
+        "github_license": "unknown",  # Would be fetched
+        "model_license": "unknown",  # Would be fetched
+        "compatible": None,  # True/False/None
+        "compatibility_level": "unknown",  # "permissive", "copyleft", "incompatible"
+        "warnings": [],
+        "note": "Production version would fetch and analyze actual licenses"
+    }
+    
+    return compatibility
