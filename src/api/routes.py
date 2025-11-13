@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, File, UploadFile, Form
 import boto3
 import json
 from datetime import datetime
@@ -7,6 +7,7 @@ from typing import Optional, Dict, List
 import hashlib
 import uuid
 import time
+import io
 import subprocess
 import tempfile
 import logging
@@ -24,11 +25,16 @@ try:
     dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
     s3 = boto3.client('s3', region_name='us-east-1')
     TABLE_NAME = os.getenv('DYNAMODB_TABLE', 'tmr-dev-registry')
+    BUCKET_NAME = os.getenv('S3_BUCKET', 'tmr-dev-models')
     table = dynamodb.Table(TABLE_NAME)
+    AWS_AVAILABLE = True
 except Exception as e:
     print(f"Warning: AWS services not available: {e}")
     table = None
     s3 = None
+    TABLE_NAME = None
+    BUCKET_NAME = None
+    AWS_AVAILABLE = False
 
 # Simple in-memory auth stores (used when no persistent auth store is available)
 
@@ -144,55 +150,102 @@ def list_models(
     }
 
 @app.post("/api/v1/models/upload")
-def upload_model(
-    name: str = Query(..., description="Model name"),
-    version: str = Query("1.0.0", description="Model version"),
-    description: Optional[str] = Query(None, description="Model description"),
-    artifact_type: str = Query("model", description="Type: model, dataset, or code"),
-    content_url: Optional[str] = Query(None, description="URL to model content (temporary implementation)")
+async def upload_model(
+    file: UploadFile = File(...),
+    model_id: str = Form(...),
+    name: str = Form(...),
+    description: Optional[str] = Form(None),
+    version: Optional[str] = Form("1.0.0")
 ):
-    """Upload a custom model (not from HuggingFace).
+    """Upload a model package (ZIP file) to S3 and store metadata in DynamoDB.
     
-    NOTE: This is a simplified implementation. In production, this would:
-    - Accept file uploads via multipart/form-data
-    - Store files in S3
-    - Compute checksums for integrity
-    - Run security scans
+    Args:
+        file: ZIP file containing the model
+        model_id: Unique identifier for the model
+        name: Human-readable model name
+        description: Optional description
+        version: Model version (default: 1.0.0)
+    
+    Returns:
+        JSON with status, model_id, s3_key, and size
     """
-    # Generate unique ID
-    artifact_id = _generate_artifact_id(name, artifact_type)
-    
-    # Basic validation
-    if artifact_id in _artifacts_store:
+    if not AWS_AVAILABLE:
         raise HTTPException(
-            status_code=409,
-            detail=f"Model with similar name already exists: {artifact_id}"
+            status_code=503,
+            detail="AWS services not available - running in local mode"
         )
     
-    # For now, we'll store metadata only (file upload would go to S3)
-    # In production, this endpoint would accept multipart/form-data
-    _artifacts_store[artifact_id] = {
-        "id": artifact_id,
-        "name": name,
-        "version": version,
-        "type": artifact_type,
-        "description": description or "",
-        "content_url": content_url or f"s3://models/{artifact_id}",
-        "uploaded_at": datetime.utcnow().isoformat(),
-        "uploader": "system",  # Would come from auth token
-        "scores": None  # Can be computed later via rate endpoint
-    }
+    # Validate file type
+    if not file.filename or not file.filename.endswith('.zip'):
+        raise HTTPException(status_code=400, detail="File must be a ZIP archive")
     
-    logger.info("Uploaded %s: %s (ID: %s)", artifact_type, name, artifact_id)
+    # Size limit: 100MB to stay in free tier
+    MAX_SIZE = 100 * 1024 * 1024
     
-    return {
-        "status": "success",
-        "model_id": artifact_id,
-        "name": name,
-        "type": artifact_type,
-        "message": f"{artifact_type.capitalize()} uploaded successfully",
-        "note": "Production version would handle file uploads to S3"
-    }
+    try:
+        # Read file content
+        contents = await file.read()
+        file_size = len(contents)
+        
+        if file_size > MAX_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large: {file_size} bytes (max: {MAX_SIZE})"
+            )
+        
+        # Generate S3 key with timestamp for uniqueness
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        s3_key = f"models/{model_id}/{timestamp}.zip"
+        
+        # Calculate file hash for integrity
+        file_hash = hashlib.sha256(contents).hexdigest()
+        
+        # Upload to S3
+        s3.put_object(
+            Bucket=BUCKET_NAME,
+            Key=s3_key,
+            Body=contents,
+            ContentType='application/zip',
+            Metadata={
+                'model_id': model_id,
+                'sha256': file_hash,
+                'original_filename': file.filename
+            }
+        )
+        
+        # Store metadata in DynamoDB
+        created_at = datetime.utcnow().isoformat()
+        table.put_item(
+            Item={
+                'model_id': model_id,
+                'name': name,
+                'description': description or '',
+                'version': version,
+                's3_key': s3_key,
+                'bucket': BUCKET_NAME,
+                'size_bytes': file_size,
+                'sha256': file_hash,
+                'created_at': created_at,
+                'updated_at': created_at,
+                'status': 'uploaded'
+            }
+        )
+        
+        return {
+            "status": "success",
+            "model_id": model_id,
+            "s3_key": s3_key,
+            "bucket": BUCKET_NAME,
+            "size_bytes": file_size,
+            "sha256": file_hash,
+            "message": "Model uploaded successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Upload error: {e}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 @app.put("/api/v1/models/{model_id}")
 def update_model(
@@ -612,13 +665,38 @@ def get_download_history(
 # Update existing get_model endpoint to handle sensitive downloads
 @app.get("/api/v1/models/{model_id}")
 def get_model(model_id: str, token: Optional[str] = Query(None)):
-    """Retrieve a specific model by ID"""
-    return {
-        "model_id": model_id,
-        "status": "found",
-        "message": "Model retrieved successfully",
-        "is_sensitive": model_id in _sensitive_models
-    }
+    """Retrieve a specific model by ID from DynamoDB"""
+    if not AWS_AVAILABLE:
+        # Fallback to in-memory for local testing
+        if model_id in _artifacts_store:
+            return _artifacts_store[model_id]
+        raise HTTPException(status_code=404, detail="Model not found")
+    
+    try:
+        response = table.get_item(Key={'model_id': model_id})
+        
+        if 'Item' not in response:
+            raise HTTPException(status_code=404, detail="Model not found")
+        
+        item = response['Item']
+        return {
+            "model_id": item['model_id'],
+            "name": item['name'],
+            "description": item.get('description', ''),
+            "version": item.get('version', '1.0.0'),
+            "s3_key": item.get('s3_key'),
+            "bucket": item.get('bucket'),
+            "size_bytes": item.get('size_bytes'),
+            "sha256": item.get('sha256'),
+            "created_at": item.get('created_at'),
+            "updated_at": item.get('updated_at'),
+            "status": item.get('status', 'unknown')
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error retrieving model: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve model: {str(e)}")
 
 
 @app.delete("/api/v1/models/{model_id}")

@@ -10,6 +10,7 @@ starlette==0.27.0
 mangum==0.17.0
 boto3==1.28.85
 pydantic==2.5.0
+python-multipart==0.0.6
 
 # Testing & Quality
 pytest==7.4.3
@@ -18,3 +19,4 @@ flake8
 mypy
 types-requests
 httpx==0.25.2
+moto[s3,dynamodb]==4.2.9
