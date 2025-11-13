@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Query, File, UploadFile, Form
+from fastapi.responses import StreamingResponse
 import boto3
 import json
 from datetime import datetime
@@ -8,6 +9,7 @@ import hashlib
 import uuid
 import time
 import io
+import zipfile
 import subprocess
 import tempfile
 import logging
@@ -710,73 +712,234 @@ def delete_model(model_id: str):
 
 
 @app.get("/api/v1/models/{model_id}/download")
-def download_model(
+async def download_model(
     model_id: str,
+    variant: str = Query("full", description="Download variant: 'full', 'weights', or 'dataset'"),
     token: Optional[str] = Query(None, description="Authentication token")
 ):
     """
-    Download a model. If sensitive, executes JS monitoring program first.
+    Download a model package from S3 with optional variant filtering.
+    
+    Args:
+        model_id: Unique model identifier
+        variant: What to download - 'full' (entire ZIP), 'weights' (model weights only), 
+                 'dataset' (datasets only)
+        token: Optional authentication token (for future auth protection)
+    
+    Returns:
+        StreamingResponse with the requested file content
     """
-    # Authenticate user
-    username = _get_username_from_token(token)
-    if not username:
-        raise HTTPException(status_code=401, detail="authentication required")
-    
-    # Check if model is sensitive
-    if model_id in _sensitive_models:
-        model_info = _sensitive_models[model_id]
-        js_program = model_info["js_program"]
-        uploader_username = model_info["uploader_username"]
-        
-        # Create temporary zip file path for JS program argument
-        # In production, this would be actual S3 path or local file
-        temp_zip_path = f"/tmp/{model_id}.zip"
-        
-        # Execute JS monitoring program
-        success, output = _execute_js_program(
-            js_program=js_program,
-            model_name=model_id,
-            uploader_username=uploader_username,
-            downloader_username=username,
-            zip_file_path=temp_zip_path
+    if not AWS_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="AWS services not available - running in local mode"
         )
+    
+    # Validate variant parameter
+    valid_variants = ["full", "weights", "dataset"]
+    if variant not in valid_variants:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid variant. Must be one of: {', '.join(valid_variants)}"
+        )
+    
+    try:
+        # Get model metadata from DynamoDB
+        response = table.get_item(Key={'model_id': model_id})
         
-        # Record download attempt
-        history_entry = {
-            "model_id": model_id,
-            "downloader_username": username,
-            "timestamp": datetime.utcnow().isoformat(),
-            "success": success,
-            "error": None if success else output
-        }
-        _download_history.append(history_entry)
+        if 'Item' not in response:
+            raise HTTPException(status_code=404, detail="Model not found")
         
-        if not success:
-            logger.warning(
-                "Sensitive model %s download blocked for %s: %s",
-                model_id,
-                username,
-                output
-            )
+        item = response['Item']
+        s3_key = item.get('s3_key')
+        bucket = item.get('bucket', BUCKET_NAME)
+        
+        if not s3_key:
             raise HTTPException(
-                status_code=403,
-                detail=f"Download rejected by monitoring program: {output}"
+                status_code=500,
+                detail="Model metadata missing S3 key"
             )
         
-        logger.info(
-            "Sensitive model %s download approved for %s",
-            model_id,
-            username
+        # Get file from S3
+        s3_response = s3.get_object(Bucket=bucket, Key=s3_key)
+        file_content = s3_response['Body'].read()
+        
+        # Calculate size cost
+        size_bytes = len(file_content)
+        size_mb = size_bytes / (1024 * 1024)
+        
+        # Handle variants
+        if variant == "full":
+            # Return entire ZIP file
+            return StreamingResponse(
+                io.BytesIO(file_content),
+                media_type="application/zip",
+                headers={
+                    "Content-Disposition": f"attachment; filename={model_id}.zip",
+                    "X-Model-ID": model_id,
+                    "X-Size-Bytes": str(size_bytes),
+                    "X-Size-MB": f"{size_mb:.2f}",
+                    "X-Variant": "full"
+                }
+            )
+        
+        # For weights or dataset variants, filter ZIP contents
+        filtered_content = _filter_zip_by_variant(file_content, variant)
+        filtered_size = len(filtered_content)
+        filtered_mb = filtered_size / (1024 * 1024)
+        
+        return StreamingResponse(
+            io.BytesIO(filtered_content),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f"attachment; filename={model_id}_{variant}.zip",
+                "X-Model-ID": model_id,
+                "X-Size-Bytes": str(filtered_size),
+                "X-Size-MB": f"{filtered_mb:.2f}",
+                "X-Variant": variant,
+                "X-Original-Size-Bytes": str(size_bytes)
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except s3.exceptions.NoSuchKey:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Model file not found in S3: {s3_key}"
+        )
+    except Exception as e:
+        print(f"Download error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Download failed: {str(e)}"
+        )
+
+
+def _filter_zip_by_variant(zip_content: bytes, variant: str) -> bytes:
+    """
+    Filter ZIP file contents based on variant (weights or dataset).
+    
+    For HuggingFace-style models:
+    - weights: include .bin, .safetensors, .pt, .pth, .h5, .onnx, config.json, tokenizer files
+    - dataset: include dataset files, data/*.*, train.*, test.*, val.*
+    
+    Args:
+        zip_content: Original ZIP file bytes
+        variant: 'weights' or 'dataset'
+    
+    Returns:
+        Filtered ZIP file bytes
+    """
+    # Weight file extensions
+    weight_extensions = {'.bin', '.safetensors', '.pt', '.pth', '.h5', '.onnx', '.pb'}
+    weight_patterns = {'config.json', 'tokenizer', 'vocab', 'merges.txt', 'special_tokens'}
+    
+    # Dataset patterns
+    dataset_patterns = {'dataset', 'data/', 'train.', 'test.', 'val.', 'valid.', '.csv', '.json', '.txt', '.parquet'}
+    
+    # Read original ZIP
+    original_zip = zipfile.ZipFile(io.BytesIO(zip_content), 'r')
+    
+    # Create filtered ZIP in memory
+    filtered_buffer = io.BytesIO()
+    filtered_zip = zipfile.ZipFile(filtered_buffer, 'w', zipfile.ZIP_DEFLATED)
+    
+    try:
+        for file_info in original_zip.filelist:
+            filename = file_info.filename.lower()
+            include = False
+            
+            if variant == "weights":
+                # Include weight files and config files
+                if any(filename.endswith(ext) for ext in weight_extensions):
+                    include = True
+                elif any(pattern in filename for pattern in weight_patterns):
+                    include = True
+            
+            elif variant == "dataset":
+                # Include dataset files
+                if any(pattern in filename for pattern in dataset_patterns):
+                    include = True
+            
+            if include:
+                # Copy file to filtered ZIP
+                data = original_zip.read(file_info.filename)
+                filtered_zip.writestr(file_info, data)
+        
+        filtered_zip.close()
+        original_zip.close()
+        
+        # Return filtered ZIP bytes
+        filtered_buffer.seek(0)
+        return filtered_buffer.read()
+    
+    except Exception as e:
+        print(f"Error filtering ZIP: {e}")
+        # If filtering fails, return original content
+        return zip_content
+
+
+@app.get("/api/v1/models/{model_id}/size")
+def get_model_size(model_id: str):
+    """
+    Get the size cost of a model (size of the download).
+    
+    Args:
+        model_id: Unique model identifier
+    
+    Returns:
+        JSON with size information in bytes, KB, MB, GB
+    """
+    if not AWS_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="AWS services not available - running in local mode"
         )
     
-    # In production, return actual file or S3 presigned URL
-    return {
-        "status": "success",
-        "model_id": model_id,
-        "message": "Download authorized",
-        "download_url": f"https://example.com/models/{model_id}.zip",
-        "note": "In production, this would be actual download URL or file stream"
-    }
+    try:
+        # Get model metadata from DynamoDB
+        response = table.get_item(Key={'model_id': model_id})
+        
+        if 'Item' not in response:
+            raise HTTPException(status_code=404, detail="Model not found")
+        
+        item = response['Item']
+        size_bytes = int(item.get('size_bytes', 0))  # Convert Decimal to int
+        
+        # Calculate different units
+        size_kb = size_bytes / 1024
+        size_mb = size_bytes / (1024 * 1024)
+        size_gb = size_bytes / (1024 * 1024 * 1024)
+        
+        return {
+            "model_id": model_id,
+            "size_bytes": size_bytes,
+            "size_kb": round(size_kb, 2),
+            "size_mb": round(size_mb, 2),
+            "size_gb": round(size_gb, 4),
+            "human_readable": _format_size(size_bytes)
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting model size: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get model size: {str(e)}"
+        )
+
+
+def _format_size(bytes_size: int) -> str:
+    """Format bytes into human-readable size string."""
+    # Convert to float in case DynamoDB returns Decimal
+    size = float(bytes_size)
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if size < 1024.0:
+            return f"{size:.2f} {unit}"
+        size /= 1024.0
+    return f"{size:.2f} PB"
 
 
 @app.post("/api/v1/reset")
