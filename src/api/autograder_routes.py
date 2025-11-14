@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, Header, Query, Body
 from fastapi.responses import JSONResponse
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 import hashlib
 import time
 import uuid
@@ -64,10 +64,18 @@ class ArtifactRegEx(BaseModel):
     regex: str
 
 class User(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra='allow')
     
     name: str
-    is_admin: bool = Field(alias="isAdmin")
+    is_admin: bool = Field(default=False)
+    
+    @model_validator(mode='before')
+    @classmethod
+    def handle_camel_case(cls, data):
+        # Convert isAdmin to is_admin if present
+        if isinstance(data, dict) and 'isAdmin' in data:
+            data['is_admin'] = data.pop('isAdmin')
+        return data
 
 class UserAuthenticationInfo(BaseModel):
     password: str
@@ -715,10 +723,18 @@ def check_license(
     return True
 
 @app.put("/authenticate")
-def authenticate(auth_request: AuthenticationRequest = Body(...)):
+def authenticate(auth_request: Dict[str, Any] = Body(...)):
     """Authenticate user (NON-BASELINE)"""
-    username = auth_request.user.name
-    password = auth_request.secret.password
+    # Parse user data - handle both camelCase and snake_case
+    user_data = auth_request.get('user', {})
+    username = user_data.get('name')
+    is_admin = user_data.get('is_admin') or user_data.get('isAdmin', False)
+    
+    secret_data = auth_request.get('secret', {})
+    password = secret_data.get('password')
+    
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Missing username or password.")
     
     # Validate user
     user = _get_user(username)
