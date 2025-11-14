@@ -51,7 +51,7 @@ def test_upload_model_success(mock_aws_services):
         'DYNAMODB_TABLE': mock_aws_services['table_name']
     }):
         # Import app after env vars are set
-        from src.api.routes import app
+        from src.api.routes import app, _init_aws_clients; _init_aws_clients()
         client = TestClient(app)
         
         # Create a fake ZIP file
@@ -94,7 +94,7 @@ def test_upload_model_invalid_file_type(mock_aws_services):
         'S3_BUCKET': mock_aws_services['bucket_name'],
         'DYNAMODB_TABLE': mock_aws_services['table_name']
     }):
-        from src.api.routes import app
+        from src.api.routes import app, _init_aws_clients; _init_aws_clients()
         client = TestClient(app)
         
         files = {'file': ('test.txt', io.BytesIO(b'not a zip'), 'text/plain')}
@@ -115,7 +115,7 @@ def test_upload_model_too_large(mock_aws_services):
         'S3_BUCKET': mock_aws_services['bucket_name'],
         'DYNAMODB_TABLE': mock_aws_services['table_name']
     }):
-        from src.api.routes import app
+        from src.api.routes import app, _init_aws_clients; _init_aws_clients()
         client = TestClient(app)
         
         # Create a file larger than 100MB
@@ -138,7 +138,7 @@ def test_upload_model_missing_required_fields(mock_aws_services):
         'S3_BUCKET': mock_aws_services['bucket_name'],
         'DYNAMODB_TABLE': mock_aws_services['table_name']
     }):
-        from src.api.routes import app
+        from src.api.routes import app, _init_aws_clients; _init_aws_clients()
         client = TestClient(app)
         
         zip_content = b'PK\x03\x04' + b'\x00' * 100
@@ -156,7 +156,7 @@ def test_get_model_success(mock_aws_services):
         'S3_BUCKET': mock_aws_services['bucket_name'],
         'DYNAMODB_TABLE': mock_aws_services['table_name']
     }):
-        from src.api.routes import app
+        from src.api.routes import app, _init_aws_clients; _init_aws_clients()
         client = TestClient(app)
         
         # First upload a model
@@ -190,7 +190,7 @@ def test_get_model_not_found(mock_aws_services):
         'S3_BUCKET': mock_aws_services['bucket_name'],
         'DYNAMODB_TABLE': mock_aws_services['table_name']
     }):
-        from src.api.routes import app
+        from src.api.routes import app, _init_aws_clients; _init_aws_clients()
         client = TestClient(app)
         
         response = client.get('/api/v1/models/nonexistent-model')
@@ -209,7 +209,7 @@ def test_upload_without_aws(monkeypatch):
     import src.api.routes
     importlib.reload(src.api.routes)
     
-    from src.api.routes import app
+    from src.api.routes import app, _init_aws_clients; _init_aws_clients()
     client = TestClient(app)
     
     zip_content = b'PK\x03\x04' + b'\x00' * 100
