@@ -1,4 +1,4 @@
 from mangum import Mangum
-from api.routes import app
+from api.autograder_routes import app
 
 handler = Mangum(app)
