@@ -4,7 +4,7 @@ These endpoints match the OpenAPI specification exactly.
 """
 
 from fastapi import FastAPI, HTTPException, Header, Query, Body
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 from pydantic import BaseModel, Field, ConfigDict, model_validator
@@ -755,7 +755,7 @@ def authenticate(auth_request: Dict[str, Any] = Body(...)):
     }
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
     
-    return f"bearer {token}"
+    return PlainTextResponse(content=f"bearer {token}", status_code=200)
 
 # Health check at root for compatibility
 @app.get("/")
