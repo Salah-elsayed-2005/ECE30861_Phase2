@@ -263,10 +263,8 @@
 
   <script>
     // --- CONFIG ---
-    // Base URL from your API Gateway
     const API_BASE_URL = "https://9wbffkyas2.execute-api.us-east-1.amazonaws.com";
 
-    // Simple helper to grab elements
     const $ = (id) => document.getElementById(id);
 
     const loginStatusPill = $("login-status-pill");
@@ -319,17 +317,11 @@
     // --- API wrapper ---
     async function apiFetch(path, options = {}) {
       const url = API_BASE_URL.replace(/\/$/, "") + path;
-      const token = getToken();
-      const headers = new Headers(options.headers || {});
 
-      // Only set JSON content-type when not using FormData
-      if (!headers.has("Content-Type") && !(options.body instanceof FormData)) {
-        headers.set("Content-Type", "application/json");
-      }
-      if (token) {
-        // We mostly send token via query, but having this set is harmless
-        headers.set("Authorization", `Bearer ${token}`);
-      }
+      // IMPORTANT: do NOT automatically add Content-Type or Authorization.
+      // Let the browser choose defaults so the request stays "simple"
+      // and avoids a CORS preflight.
+      const headers = new Headers(options.headers || {});
 
       const resp = await fetch(url, {
         ...options,
@@ -402,7 +394,6 @@
 
       setStatus(authStatus, "Logging out…");
       try {
-        // Backend: POST /api/v1/logout?token=...
         await apiFetch(
           `/api/v1/logout?token=${encodeURIComponent(token)}`,
           { method: "POST" }
@@ -418,7 +409,7 @@
     $("upload-button").addEventListener("click", async () => {
       const name = $("model-name-input").value.trim();
       const fileInput = $("model-file-input");
-      const isSensitive = $("model-sensitive-input").checked; // reserved for later
+      const isSensitive = $("model-sensitive-input").checked; // not used yet
 
       if (!getToken()) {
         setStatus(uploadStatus, "You must be logged in to upload.", "error");
@@ -438,19 +429,16 @@
 
       try {
         const formData = new FormData();
-        // Backend requires: file, model_id, name, description, version
         formData.append("file", file);
-        // For now, reuse `name` as model_id so they match
         formData.append("model_id", name);
         formData.append("name", name);
         formData.append("description", "");
         formData.append("version", "1.0.0");
 
-        // Note: `isSensitive` isn't used by this endpoint yet
         const data = await apiFetch("/api/v1/models/upload", {
           method: "POST",
           body: formData,
-          headers: {}, // allow browser to set multipart boundary
+          headers: {}, // let browser set multipart boundaries
         });
 
         setStatus(
@@ -499,20 +487,16 @@
         const name =
           m.name || m.model_name || m.id || m.model_id || "(unnamed)";
         const type = m.type || "model";
-        // Sensitive info is not directly in this object yet; we just show "Unknown"
-        const isSensitive = false;
+        const isSensitive = false; // unknown for now
 
-        // Name
         const tdName = document.createElement("td");
         tdName.textContent = name;
         tr.appendChild(tdName);
 
-        // Type
         const tdType = document.createElement("td");
         tdType.textContent = type;
         tr.appendChild(tdType);
 
-        // Sensitive badge
         const tdSens = document.createElement("td");
         const badge = document.createElement("span");
         badge.classList.add("badge");
@@ -525,7 +509,6 @@
         tdSens.appendChild(badge);
         tr.appendChild(tdSens);
 
-        // Actions
         const tdActions = document.createElement("td");
         const fullBtn = document.createElement("button");
         fullBtn.textContent = "Download";
@@ -557,13 +540,10 @@
     async function loadModels() {
       setStatus(modelsStatus, "Loading models…");
       try {
-        // Backend: GET /api/v1/models?limit=50&skip=0
         const data = await apiFetch("/api/v1/models?limit=50&skip=0", {
           method: "GET",
         });
 
-        // Response shape from routes.py:
-        // { "models": [...], "count": total, "limit": limit, "skip": skip, ... }
         const models = data.models || [];
         cachedModels = models;
         renderModels(models);
@@ -591,7 +571,6 @@
       setStatus(modelsStatus, `Preparing download for ${id}…`);
 
       try {
-        // Backend: GET /api/v1/models/{model_id}/download?variant=full&token=...
         const url =
           API_BASE_URL.replace(/\/$/, "") +
           `/api/v1/models/${encodeURIComponent(
@@ -627,7 +606,7 @@
       }
     }
 
-    // --- Init on page load ---
+    // --- Init ---
     window.addEventListener("DOMContentLoaded", () => {
       initAuthState();
       loadModels();
