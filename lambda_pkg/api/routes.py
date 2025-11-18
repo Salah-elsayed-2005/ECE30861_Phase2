@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query, File, UploadFile, Form
 from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 import boto3
 import json
 from datetime import datetime
@@ -20,6 +21,14 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Trustworthy Model Registry",
     description="Phase 2 Registry API - Delivery 1"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],      # allow all origins (fine for this class project)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # AWS clients initialization
