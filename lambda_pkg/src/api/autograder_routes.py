@@ -41,6 +41,9 @@ except Exception as e:
 JWT_SECRET = os.getenv('JWT_SECRET', 'ece461-secret-key-change-in-production')
 JWT_ALGORITHM = 'HS256'
 
+# API Gateway URL for download links
+API_GATEWAY_URL = os.getenv('API_GATEWAY_URL', 'https://example.com')
+
 # ==================== Data Models ====================
 
 class ArtifactMetadata(BaseModel):
@@ -423,20 +426,21 @@ def create_artifact(
     if any(score < 0.5 for score in scores.values()):
         raise HTTPException(status_code=424, detail="Artifact is not registered due to the disqualified rating.")
     
+    # Build download URL
+    download_url = f"{API_GATEWAY_URL}/download/{artifact_id}"
+    
     # Store artifact
     artifact = {
         "name": name,
         "type": artifact_type,
         "url": artifact_data.url,
+        "download_url": download_url,
         "scores": scores,
         "net_score": net_score,
         "created_at": datetime.utcnow().isoformat(),
         "created_by": username
     }
     _store_artifact(artifact_id, artifact)
-    
-    # Build response
-    download_url = f"https://example.com/download/{artifact_id}"
     
     response = {
         "metadata": {
@@ -470,6 +474,9 @@ def get_artifact(
     if artifact["type"] != artifact_type:
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
+    # Use stored download_url or generate if not present
+    download_url = artifact.get("download_url", f"{API_GATEWAY_URL}/download/{id}")
+    
     return {
         "metadata": {
             "name": artifact["name"],
@@ -478,7 +485,7 @@ def get_artifact(
         },
         "data": {
             "url": artifact["url"],
-            "download_url": f"https://example.com/download/{id}"
+            "download_url": download_url
         }
     }
 
