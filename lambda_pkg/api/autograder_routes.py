@@ -271,6 +271,17 @@ def _delete_artifact(artifact_id: str):
     
     _artifacts_store.pop(artifact_id, None)
 
+def _create_artifact(artifact: Dict[str, Any]):
+    """Create a new artifact (wrapper for _store_artifact)"""
+    artifact_id = artifact['model_id'].replace('ARTIFACT#', '')
+    artifact_copy = {k: v for k, v in artifact.items() if k != 'model_id'}
+    _store_artifact(artifact_id, artifact_copy)
+
+def _update_artifact(artifact_id: str, artifact: Dict[str, Any]):
+    """Update an existing artifact (wrapper for _store_artifact)"""
+    artifact_copy = {k: v for k, v in artifact.items() if k != 'model_id'}
+    _store_artifact(artifact_id, artifact_copy)
+
 def _clear_all_artifacts():
     """Clear all artifacts from DynamoDB or memory"""
     if AWS_AVAILABLE:
@@ -766,3 +777,339 @@ def authenticate(auth_request: AuthenticationRequest = Body(...)):
 @app.get("/")
 def root():
     return {"status": "ok", "service": "ECE 461 Trustworthy Model Registry"}
+
+
+# ==================== BASELINE PACKAGE ENDPOINTS ====================
+# These endpoints use "package" terminology (baseline spec) and map to artifact logic
+
+class PackageQuery(BaseModel):
+    """Query for packages (baseline spec)"""
+    model_config = ConfigDict(populate_by_name=True)
+    version: Optional[str] = Field(None, alias="Version")
+    name: str = Field(alias="Name")
+
+class PackageData(BaseModel):
+    """Package data for upload (baseline spec)"""
+    model_config = ConfigDict(populate_by_name=True)
+    content: Optional[str] = Field(None, alias="Content")
+    url: Optional[str] = Field(None, alias="URL")
+    js_program: Optional[str] = Field(None, alias="JSProgram")
+    debloat: Optional[bool] = Field(False, alias="debloat")
+
+class PackageMetadata(BaseModel):
+    """Package metadata (baseline spec)"""
+    model_config = ConfigDict(populate_by_name=True)
+    name: str = Field(alias="Name")
+    version: str = Field(alias="Version")
+    id_field: str = Field(alias="ID")
+
+class Package(BaseModel):
+    """Package (baseline spec)"""
+    model_config = ConfigDict(populate_by_name=True)
+    metadata: PackageMetadata = Field(alias="metadata")
+    data: PackageData = Field(alias="data")
+
+class PackageRegExRequest(BaseModel):
+    """RegEx search request (baseline spec)"""
+    model_config = ConfigDict(populate_by_name=True)
+    regex: str = Field(alias="RegEx")
+
+@app.post("/packages")
+def post_packages(
+    queries: List[PackageQuery] = Body(...),
+    offset: Optional[str] = Query(None),
+    x_authorization: Optional[str] = Header(None, alias="X-Authorization")
+):
+    """Get packages from registry (BASELINE - maps to /artifacts)"""
+    username = _validate_token(x_authorization)
+    if not username:
+        raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
+    
+    results = []
+    all_artifacts = _list_artifacts()
+    
+    # Handle wildcard query
+    if len(queries) == 1 and queries[0].name == "*":
+        for artifact_id, artifact in all_artifacts:
+            # Treat all artifacts as "packages" for baseline compatibility
+            results.append({
+                "Version": artifact.get("version", "1.0.0"),
+                "Name": artifact["name"],
+                "ID": artifact_id
+            })
+    else:
+        # Handle specific queries
+        for query in queries:
+            for artifact_id, artifact in all_artifacts:
+                if artifact["name"] == query.name:
+                    # Version match if specified
+                    if query.version is None or artifact.get("version") == query.version:
+                        results.append({
+                            "Version": artifact.get("version", "1.0.0"),
+                            "Name": artifact["name"],
+                            "ID": artifact_id
+                        })
+    
+    # Apply offset for pagination
+    start_idx = int(offset) if offset else 0
+    page_size = 10
+    paginated = results[start_idx:start_idx + page_size]
+    
+    # Return with offset header if more results
+    next_offset = str(start_idx + page_size) if start_idx + page_size < len(results) else None
+    
+    return JSONResponse(
+        status_code=200,
+        content=paginated,
+        headers={"offset": next_offset} if next_offset else {}
+    )
+
+@app.post("/package")
+def create_package(
+    package: Package = Body(...),
+    x_authorization: Optional[str] = Header(None, alias="X-Authorization")
+):
+    """Upload a package (BASELINE - maps to /artifact/model)"""
+    username = _validate_token(x_authorization)
+    if not username:
+        raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
+    
+    # Map package to artifact
+    artifact_data = ArtifactData(
+        url=package.data.url,
+        content=package.data.content,
+        js_program=package.data.js_program,
+        debloat=package.data.debloat
+    )
+    
+    # Create as model artifact
+    artifact_type = "model"
+    
+    if not artifact_data.url and not artifact_data.content:
+        raise HTTPException(status_code=400, detail="Either URL or Content must be provided.")
+    
+    # Generate artifact ID
+    artifact_id = str(uuid.uuid4())
+    
+    # Create artifact record
+    artifact = {
+        "model_id": f"ARTIFACT#{artifact_id}",
+        "name": package.metadata.name,
+        "version": package.metadata.version,
+        "type": artifact_type,
+        "url": artifact_data.url or "",
+        "content": artifact_data.content or "",
+        "js_program": artifact_data.js_program or "",
+        "debloat": artifact_data.debloat,
+        "uploaded_by": username,
+        "created_at": datetime.utcnow().isoformat()
+    }
+    
+    _create_artifact(artifact)
+    
+    return JSONResponse(
+        status_code=201,
+        content={
+            "metadata": {
+                "Name": artifact["name"],
+                "Version": artifact["version"],
+                "ID": artifact_id
+            },
+            "data": {
+                "Content": artifact_data.content or "",
+                "URL": artifact_data.url or "",
+                "JSProgram": artifact_data.js_program or "",
+                "debloat": artifact_data.debloat
+            }
+        }
+    )
+
+@app.get("/package/byName/{name}")
+def get_package_by_name(
+    name: str,
+    x_authorization: Optional[str] = Header(None, alias="X-Authorization")
+):
+    """Get package history by name (BASELINE - maps to /artifact/byName)"""
+    username = _validate_token(x_authorization)
+    if not username:
+        raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
+    
+    all_artifacts = _list_artifacts()
+    results = []
+    
+    for artifact_id, artifact in all_artifacts:
+        if artifact["name"] == name:
+            results.append({
+                "Version": artifact.get("version", "1.0.0"),
+                "Name": artifact["name"],
+                "ID": artifact_id
+            })
+    
+    if not results:
+        raise HTTPException(status_code=404, detail="Package does not exist.")
+    
+    return JSONResponse(status_code=200, content=results)
+
+@app.post("/package/byRegEx")
+def search_packages_by_regex(
+    request: PackageRegExRequest = Body(...),
+    x_authorization: Optional[str] = Header(None, alias="X-Authorization")
+):
+    """Search packages by regex (BASELINE - maps to /artifact/byRegEx)"""
+    username = _validate_token(x_authorization)
+    if not username:
+        raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
+    
+    import re
+    try:
+        pattern = re.compile(request.regex)
+    except re.error:
+        raise HTTPException(status_code=400, detail="Invalid regex pattern.")
+    
+    all_artifacts = _list_artifacts()
+    results = []
+    
+    for artifact_id, artifact in all_artifacts:
+        if pattern.search(artifact["name"]) or pattern.search(artifact.get("readme", "")):
+            results.append({
+                "Version": artifact.get("version", "1.0.0"),
+                "Name": artifact["name"],
+                "ID": artifact_id
+            })
+    
+    return JSONResponse(status_code=200, content=results)
+
+@app.get("/package/{id}")
+def get_package_by_id(
+    id: str,
+    x_authorization: Optional[str] = Header(None, alias="X-Authorization")
+):
+    """Get package by ID (BASELINE - maps to /artifacts/model/{id})"""
+    username = _validate_token(x_authorization)
+    if not username:
+        raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
+    
+    artifact = _get_artifact(id)
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Package does not exist.")
+    
+    return JSONResponse(
+        status_code=200,
+        content={
+            "metadata": {
+                "Name": artifact["name"],
+                "Version": artifact.get("version", "1.0.0"),
+                "ID": id
+            },
+            "data": {
+                "Content": artifact.get("content", ""),
+                "URL": artifact.get("url", ""),
+                "JSProgram": artifact.get("js_program", ""),
+                "debloat": artifact.get("debloat", False)
+            }
+        }
+    )
+
+@app.put("/package/{id}")
+def update_package(
+    id: str,
+    package: Package = Body(...),
+    x_authorization: Optional[str] = Header(None, alias="X-Authorization")
+):
+    """Update package (BASELINE - maps to /artifacts/model/{id})"""
+    username = _validate_token(x_authorization)
+    if not username:
+        raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
+    
+    artifact = _get_artifact(id)
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Package does not exist.")
+    
+    # Update artifact
+    artifact["name"] = package.metadata.name
+    artifact["version"] = package.metadata.version
+    artifact["url"] = package.data.url or artifact.get("url", "")
+    artifact["content"] = package.data.content or artifact.get("content", "")
+    artifact["js_program"] = package.data.js_program or artifact.get("js_program", "")
+    artifact["debloat"] = package.data.debloat
+    artifact["updated_at"] = datetime.utcnow().isoformat()
+    
+    _update_artifact(id, artifact)
+    
+    return JSONResponse(status_code=200, content={"message": "Version is updated."})
+
+@app.delete("/package/{id}")
+def delete_package(
+    id: str,
+    x_authorization: Optional[str] = Header(None, alias="X-Authorization")
+):
+    """Delete package (BASELINE - maps to /artifacts/model/{id})"""
+    username = _validate_token(x_authorization)
+    if not username:
+        raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
+    
+    artifact = _get_artifact(id)
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Package does not exist.")
+    
+    _delete_artifact(id)
+    
+    return JSONResponse(status_code=200, content={"message": "Package is deleted."})
+
+@app.get("/package/{id}/rate")
+def get_package_rating(
+    id: str,
+    x_authorization: Optional[str] = Header(None, alias="X-Authorization")
+):
+    """Get package rating (BASELINE - maps to /artifact/model/{id}/rate)"""
+    username = _validate_token(x_authorization)
+    if not username:
+        raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
+    
+    artifact = _get_artifact(id)
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Package does not exist.")
+    
+    # Return mock ratings for now
+    return JSONResponse(
+        status_code=200,
+        content={
+            "BusFactor": 0.5,
+            "Correctness": 0.8,
+            "RampUp": 0.7,
+            "ResponsiveMaintainer": 0.6,
+            "LicenseScore": 1.0,
+            "GoodPinningPractice": 0.9,
+            "PullRequest": 0.7,
+            "NetScore": 0.74
+        }
+    )
+
+@app.get("/package/{id}/cost")
+def get_package_cost(
+    id: str,
+    dependency: Optional[bool] = Query(False),
+    x_authorization: Optional[str] = Header(None, alias="X-Authorization")
+):
+    """Get package cost (BASELINE - maps to /artifact/model/{id}/cost)"""
+    username = _validate_token(x_authorization)
+    if not username:
+        raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
+    
+    artifact = _get_artifact(id)
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Package does not exist.")
+    
+    # Return mock cost data
+    standalone_cost = len(artifact.get("content", "")) / 1024.0  # KB
+    total_cost = standalone_cost * 1.5 if dependency else standalone_cost
+    
+    return JSONResponse(
+        status_code=200,
+        content={
+            f"{id}": {
+                "standaloneCost": round(standalone_cost, 2),
+                "totalCost": round(total_cost, 2)
+            }
+        }
+    )
