@@ -69,14 +69,11 @@ class User(BaseModel):
     name: str
     is_admin: bool = Field(alias="isAdmin")
 
-class UserAuthenticationInfo(BaseModel):
-    password: str
-
 class AuthenticationRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     
-    user: User = Field(alias="User")
-    secret: UserAuthenticationInfo = Field(alias="Secret")
+    user: str = Field(alias="User")
+    secret: str = Field(alias="Secret")
 
 class SimpleLicenseCheckRequest(BaseModel):
     github_url: str
@@ -737,8 +734,8 @@ def check_license(
 @app.put("/authenticate")
 def authenticate(auth_request: AuthenticationRequest = Body(...)):
     """Authenticate user (NON-BASELINE)"""
-    username = auth_request.user.name
-    password = auth_request.secret.password
+    username = auth_request.user
+    password = auth_request.secret
     
     # Validate user
     user = _get_user(username)
