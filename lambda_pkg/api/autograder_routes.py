@@ -122,13 +122,13 @@ def _hash_password(password: str, salt: str) -> str:
     return hashlib.sha256((salt + password).encode('utf-8')).hexdigest()
 
 def _create_user(username: str, password: str, is_admin: bool = False):
-    """Create user in DynamoDB or memory"""
+    """Create user in DynamoDB or memory (idempotent - won't fail if user exists)"""
     if AWS_AVAILABLE:
         try:
             # Check if exists
             response = table.get_item(Key={'model_id': f'USER#{username}'})
             if 'Item' in response:
-                raise ValueError("user_exists")
+                return  # User already exists, silently return
             
             salt = uuid.uuid4().hex
             pw_hash = _hash_password(password, salt)
@@ -146,7 +146,7 @@ def _create_user(username: str, password: str, is_admin: bool = False):
     
     # Fallback to memory
     if username in _users_store:
-        raise ValueError("user_exists")
+        return  # User already exists, silently return
     salt = uuid.uuid4().hex
     pw_hash = _hash_password(password, salt)
     _users_store[username] = {
