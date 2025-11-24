@@ -59,17 +59,19 @@ resource "aws_cloudwatch_log_group" "api" {
 
 # 4) IAM Role for Lambda
 resource "aws_iam_role" "lambda_exec" {
-  name = "${local.name_prefix}-lambda-exec"
+  name_prefix = "${var.project}-${var.env}-lambda-exec-"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
-      Principal = {
-        Service = "lambda.amazonaws.com"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
       }
-    }]
+    ]
   })
 
   tags = {
