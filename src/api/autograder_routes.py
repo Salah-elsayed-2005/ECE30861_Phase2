@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, Header, Query, Body
 from fastapi.responses import JSONResponse, PlainTextResponse
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
-from pydantic import BaseModel, Field, ConfigDict, model_validator
+from pydantic import BaseModel, Field, ConfigDict
 import hashlib
 import time
 import uuid
@@ -64,25 +64,19 @@ class ArtifactRegEx(BaseModel):
     regex: str
 
 class User(BaseModel):
-    model_config = ConfigDict(populate_by_name=True, extra='allow')
+    model_config = ConfigDict(populate_by_name=True)
     
     name: str
-    is_admin: bool = Field(default=False)
-    
-    @model_validator(mode='before')
-    @classmethod
-    def handle_camel_case(cls, data):
-        # Convert isAdmin to is_admin if present
-        if isinstance(data, dict) and 'isAdmin' in data:
-            data['is_admin'] = data.pop('isAdmin')
-        return data
+    is_admin: bool = Field(alias="isAdmin")
 
 class UserAuthenticationInfo(BaseModel):
     password: str
 
 class AuthenticationRequest(BaseModel):
-    user: User
-    secret: UserAuthenticationInfo
+    model_config = ConfigDict(populate_by_name=True)
+    
+    user: User = Field(alias="User")
+    secret: UserAuthenticationInfo = Field(alias="Secret")
 
 class SimpleLicenseCheckRequest(BaseModel):
     github_url: str
@@ -125,7 +119,7 @@ SESSION_TTL_SECONDS = 3600
 
 # Seed default admin
 _DEFAULT_ADMIN_USERNAME = 'ece30861defaultadminuser'
-_DEFAULT_ADMIN_PASSWORD = "correcthorsebatterystaple123(!)"
+_DEFAULT_ADMIN_PASSWORD = "correcthorsebatterystaple123(!__+@**(A;DROP TABLE packages)"
 
 def _hash_password(password: str, salt: str) -> str:
     return hashlib.sha256((salt + password).encode('utf-8')).hexdigest()
@@ -294,6 +288,23 @@ def _clear_all_artifacts():
     
     _artifacts_store.clear()
 
+def _clear_all_users():
+    """Clear all users from DynamoDB or memory except default admin"""
+    if AWS_AVAILABLE:
+        try:
+            # Scan and delete all users
+            response = table.scan(
+                FilterExpression='begins_with(model_id, :prefix)',
+                ExpressionAttributeValues={':prefix': 'USER#'}
+            )
+            for item in response.get('Items', []):
+                table.delete_item(Key={'model_id': item['model_id']})
+            return
+        except Exception as e:
+            print(f"DynamoDB error: {e}")
+    
+    _users_store.clear()
+
 # Seed admin user
 try:
     _create_user(_DEFAULT_ADMIN_USERNAME, _DEFAULT_ADMIN_PASSWORD, is_admin=True)
@@ -328,8 +339,9 @@ def reset_registry(x_authorization: Optional[str] = Header(None, alias="X-Author
     if not user or not user.get("is_admin"):
         raise HTTPException(status_code=401, detail="You do not have permission to reset the registry.")
     
-    # Clear all artifacts
+    # Clear all artifacts and users
     _clear_all_artifacts()
+    _clear_all_users()
     
     # Re-seed admin
     try:
@@ -723,18 +735,10 @@ def check_license(
     return True
 
 @app.put("/authenticate")
-def authenticate(auth_request: Dict[str, Any] = Body(...)):
+def authenticate(auth_request: AuthenticationRequest = Body(...)):
     """Authenticate user (NON-BASELINE)"""
-    # Parse user data - handle both camelCase and snake_case
-    user_data = auth_request.get('user', {})
-    username = user_data.get('name')
-    is_admin = user_data.get('is_admin') or user_data.get('isAdmin', False)
-    
-    secret_data = auth_request.get('secret', {})
-    password = secret_data.get('password')
-    
-    if not username or not password:
-        raise HTTPException(status_code=400, detail="Missing username or password.")
+    username = auth_request.user.name
+    password = auth_request.secret.password
     
     # Validate user
     user = _get_user(username)
@@ -755,6 +759,7 @@ def authenticate(auth_request: Dict[str, Any] = Body(...)):
     }
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
     
+    # Return plain text response with bearer prefix
     return PlainTextResponse(content=f"bearer {token}", status_code=200)
 
 # Health check at root for compatibility
