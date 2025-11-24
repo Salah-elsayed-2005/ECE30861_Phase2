@@ -119,7 +119,7 @@ SESSION_TTL_SECONDS = 3600
 
 # Seed default admin
 _DEFAULT_ADMIN_USERNAME = 'ece30861defaultadminuser'
-_DEFAULT_ADMIN_PASSWORD = "correcthorsebatterystaple123(!__+@**(A'\";DROP TABLE artifacts;"
+_DEFAULT_ADMIN_PASSWORD = "correcthorsebatterystaple123(!__+@**(A'\"`;DROP TABLE artifacts;"
 
 def _hash_password(password: str, salt: str) -> str:
     return hashlib.sha256((salt + password).encode('utf-8')).hexdigest()
@@ -750,6 +750,13 @@ def authenticate(auth_request: AuthenticationRequest = Body(...)):
     """Authenticate user (NON-BASELINE)"""
     username = auth_request.user.name
     password = auth_request.secret.password
+    
+    # Ensure default admin exists (idempotent)
+    if username == _DEFAULT_ADMIN_USERNAME:
+        try:
+            _create_user(_DEFAULT_ADMIN_USERNAME, _DEFAULT_ADMIN_PASSWORD, is_admin=True)
+        except:
+            pass
     
     # Validate user
     user = _get_user(username)
