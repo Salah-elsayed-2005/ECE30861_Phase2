@@ -12,3 +12,7 @@ crash.log
 *.tfvars
 .venv/
 venv/
+
+# Lambda deployment package and dependencies
+lambda_pkg/
+lambda_deployment.zip
