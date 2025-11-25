@@ -686,22 +686,30 @@ def get_artifact_cost(
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
-    # Mock cost calculation
-    base_cost = 412.5
+    # Calculate cost based on content size
+    content_size = len(artifact.get("content", "")) if artifact.get("content") else 0
+    standalone_cost = max(1.0, content_size / 1024.0)  # At least 1 KB
+    total_cost = standalone_cost * 2.0 if dependency else standalone_cost
     
     if dependency:
-        return {
-            id: {
-                "standalone_cost": base_cost,
-                "total_cost": base_cost
+        return JSONResponse(
+            status_code=200,
+            content={
+                id: {
+                    "standalone_cost": float(round(standalone_cost, 2)),
+                    "total_cost": float(round(total_cost, 2))
+                }
             }
-        }
+        )
     else:
-        return {
-            id: {
-                "total_cost": base_cost
+        return JSONResponse(
+            status_code=200,
+            content={
+                id: {
+                    "total_cost": float(round(total_cost, 2))
+                }
             }
-        }
+        )
 
 @app.get("/artifact/model/{id}/lineage")
 def get_model_lineage(
