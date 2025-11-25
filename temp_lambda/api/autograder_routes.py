@@ -670,6 +670,38 @@ def rate_model(
     
     return rating
 
+@app.get("/artifact/model/{id}/cost")
+def get_model_cost(
+    id: str,
+    dependency: bool = Query(False),
+    x_authorization: Optional[str] = Header(None, alias="X-Authorization")
+):
+    """Get model artifact cost (BASELINE)"""
+    username = _validate_token(x_authorization)
+    if not username:
+        raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
+    
+    artifact = _get_artifact(id)
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Artifact does not exist.")
+    
+    # Mock cost calculation
+    base_cost = 412.5
+    
+    if dependency:
+        return {
+            id: {
+                "standalone_cost": base_cost,
+                "total_cost": base_cost
+            }
+        }
+    else:
+        return {
+            id: {
+                "total_cost": base_cost
+            }
+        }
+
 @app.get("/artifact/{artifact_type}/{id}/cost")
 def get_artifact_cost(
     artifact_type: str,
