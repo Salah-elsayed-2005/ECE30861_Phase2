@@ -408,7 +408,7 @@ def list_artifacts_query(
     
     # Apply offset for pagination
     start_idx = int(offset) if offset else 0
-    page_size = 10
+    page_size = 100  # Increased to handle batch queries
     paginated = results[start_idx:start_idx + page_size]
     
     # Return with offset header
@@ -615,6 +615,10 @@ def delete_artifact(
     
     artifact = _get_artifact(id)
     if not artifact:
+        raise HTTPException(status_code=404, detail="Artifact does not exist.")
+    
+    # Validate artifact type matches
+    if artifact["type"] != artifact_type:
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
     _delete_artifact(id)
