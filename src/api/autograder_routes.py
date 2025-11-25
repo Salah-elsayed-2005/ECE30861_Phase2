@@ -691,25 +691,13 @@ def get_artifact_cost(
     standalone_cost = max(1.0, content_size / 1024.0)  # At least 1 KB
     total_cost = standalone_cost * 2.0 if dependency else standalone_cost
     
-    if dependency:
-        return JSONResponse(
-            status_code=200,
-            content={
-                id: {
-                    "standalone_cost": float(round(standalone_cost, 2)),
-                    "total_cost": float(round(total_cost, 2))
-                }
-            }
-        )
-    else:
-        return JSONResponse(
-            status_code=200,
-            content={
-                id: {
-                    "total_cost": float(round(total_cost, 2))
-                }
-            }
-        )
+    # Always return both fields
+    return {
+        id: {
+            "standalone_cost": float(round(standalone_cost, 2)),
+            "total_cost": float(round(total_cost, 2))
+        }
+    }
 
 @app.get("/artifact/model/{id}/lineage")
 def get_model_lineage(
