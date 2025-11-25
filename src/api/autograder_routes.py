@@ -559,7 +559,12 @@ def get_artifact(
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
-    if artifact["type"] != artifact_type:
+    # Normalize type comparison (handle case variations)
+    artifact_type_lower = artifact_type.lower()
+    stored_type_lower = artifact.get("type", "").lower()
+    
+    if stored_type_lower != artifact_type_lower:
+        print(f"Type mismatch: requested '{artifact_type}' but artifact is '{artifact.get('type')}' for ID {id}")
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
     return {
@@ -569,7 +574,7 @@ def get_artifact(
             "type": artifact["type"]
         },
         "data": {
-            "url": artifact["url"],
+            "url": artifact.get("url", ""),
             "download_url": f"https://example.com/download/{id}"
         }
     }
@@ -617,8 +622,12 @@ def delete_artifact(
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
-    # Validate artifact type matches
-    if artifact["type"] != artifact_type:
+    # Normalize type comparison (handle case variations)
+    artifact_type_lower = artifact_type.lower()
+    stored_type_lower = artifact.get("type", "").lower()
+    
+    if stored_type_lower != artifact_type_lower:
+        print(f"Delete type mismatch: requested '{artifact_type}' but artifact is '{artifact.get('type')}' for ID {id}")
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
     _delete_artifact(id)
