@@ -586,6 +586,31 @@ def get_artifact_by_name(
     
     return results
 
+@app.get("/artifact/{artifact_type}/byName/{name}")
+def get_artifact_by_name_and_type(
+    artifact_type: str,
+    name: str,
+    x_authorization: Optional[str] = Header(None, alias="X-Authorization")
+):
+    """Get artifacts by name and type (for autograder compatibility)"""
+    username = _validate_token(x_authorization)
+    if not username:
+        raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
+    
+    results = []
+    for artifact_id, artifact in _list_artifacts():
+        if artifact["name"] == name and artifact["type"] == artifact_type:
+            results.append({
+                "name": artifact["name"],
+                "id": artifact_id,
+                "type": artifact["type"]
+            })
+    
+    if not results:
+        raise HTTPException(status_code=404, detail="No such artifact.")
+    
+    return results
+
 @app.post("/artifact/byRegEx")
 def get_artifact_by_regex(
     regex_query: ArtifactRegEx = Body(...),
@@ -614,6 +639,42 @@ def get_artifact_by_regex(
     
     if not results:
         raise HTTPException(status_code=404, detail="No artifact found under this regex.")
+    
+    return results
+
+@app.post("/artifacts/{artifact_type}/query")
+def query_artifacts_by_type(
+    artifact_type: str,
+    queries: List[ArtifactQuery] = Body(...),
+    x_authorization: Optional[str] = Header(None, alias="X-Authorization")
+):
+    """Query artifacts by type and name (for autograder compatibility)"""
+    username = _validate_token(x_authorization)
+    if not username:
+        raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
+    
+    results = []
+    all_artifacts = _list_artifacts()
+    
+    # Handle wildcard query
+    if queries == [{}] or (len(queries) == 1 and not hasattr(queries[0], 'name')):
+        for artifact_id, artifact in all_artifacts:
+            if artifact["type"] == artifact_type:
+                results.append({
+                    "name": artifact["name"],
+                    "id": artifact_id,
+                    "type": artifact["type"]
+                })
+    else:
+        # Specific queries
+        for query in queries:
+            for artifact_id, artifact in all_artifacts:
+                if artifact["type"] == artifact_type and artifact["name"] == query.name:
+                    results.append({
+                        "name": artifact["name"],
+                        "id": artifact_id,
+                        "type": artifact["type"]
+                    })
     
     return results
 
