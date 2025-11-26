@@ -20,14 +20,6 @@ from decimal import Decimal
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-# Import metrics bridge for actual metric computation
-try:
-    from metric_bridge import compute_artifact_metrics
-    METRICS_AVAILABLE = True
-except Exception as e:
-    print(f"Warning: Metrics not available: {e}")
-    METRICS_AVAILABLE = False
-
 app = FastAPI(
     title="ECE 461 - Fall 2025 - Project Phase 2",
     version="3.4.4",
@@ -125,9 +117,9 @@ _users_store: Dict[str, Dict[str, str]] = {}
 
 SESSION_TTL_SECONDS = 3600
 
-# Seed default admin
+# Seed default admin - EXACT password from OpenAPI spec line 560
 _DEFAULT_ADMIN_USERNAME = 'ece30861defaultadminuser'
-_DEFAULT_ADMIN_PASSWORD = '''correcthorsebatterystaple123(!__+@**(A'"`;DROP TABLE packages;'''
+_DEFAULT_ADMIN_PASSWORD = 'correcthorsebatterystaple123(!__+@**(A\'"`;DROP TABLE artifacts;'
 
 def _hash_password(password: str, salt: str) -> str:
     return hashlib.sha256((salt + password).encode('utf-8')).hexdigest()
@@ -408,7 +400,7 @@ def list_artifacts_query(
     
     # Apply offset for pagination
     start_idx = int(offset) if offset else 0
-    page_size = 100  # Increased to handle batch queries
+    page_size = 10
     paginated = results[start_idx:start_idx + page_size]
     
     # Return with offset header
@@ -444,72 +436,21 @@ def create_artifact(
     # Generate ID
     artifact_id = _generate_artifact_id()
     
-    # Compute actual metrics using Phase 1 metrics system
-    scores = {}
-    net_score = 0.0
+    # Compute basic metrics (mock for now)
+    scores = {
+        "bus_factor": 0.5,
+        "ramp_up_time": 0.75,
+        "license": 0.8,
+        "availability": 0.9,
+        "code_quality": 0.7,
+        "dataset_quality": 0.6,
+        "performance_claims": 0.85,
+        "reproducibility": 0.6,
+        "reviewedness": 0.6,
+        "tree_score": 0.7
+    }
     
-    if METRICS_AVAILABLE:
-        try:
-            # Get all artifacts for treescore registry
-            model_registry = {}
-            for aid, art in _list_artifacts():
-                model_registry[aid] = art
-            
-            # Compute all metrics
-            metrics_result = compute_artifact_metrics(
-                artifact_url=artifact_data.url,
-                artifact_type=artifact_type,
-                artifact_name=name,
-                model_registry=model_registry
-            )
-            
-            # Extract individual scores
-            scores = {
-                "bus_factor": max(0.0, metrics_result.get("bus_factor", 0.5)),
-                "ramp_up_time": max(0.0, metrics_result.get("ramp_up_time", 0.75)),
-                "license": max(0.0, metrics_result.get("license", 0.8)),
-                "availability": max(0.0, metrics_result.get("availability", 0.9)),
-                "code_quality": max(0.0, metrics_result.get("code_quality", 0.7)),
-                "dataset_quality": max(0.0, metrics_result.get("dataset_quality", 0.6)),
-                "performance_claims": max(0.0, metrics_result.get("performance_claims", 0.85)),
-                "reproducibility": max(0.0, metrics_result.get("reproducibility", 0.6)),
-                "reviewedness": max(0.0, metrics_result.get("reviewedness", 0.6)),
-                "tree_score": max(0.0, metrics_result.get("tree_score", 0.7))
-            }
-            
-            net_score = metrics_result.get("net_score", sum(scores.values()) / len(scores))
-            
-        except Exception as e:
-            print(f"Metrics computation failed: {e}")
-            # Fallback to default values
-            scores = {
-                "bus_factor": 0.5,
-                "ramp_up_time": 0.75,
-                "license": 0.8,
-                "availability": 0.9,
-                "code_quality": 0.7,
-                "dataset_quality": 0.6,
-                "performance_claims": 0.85,
-                "reproducibility": 0.6,
-                "reviewedness": 0.6,
-                "tree_score": 0.7
-            }
-            net_score = sum(scores.values()) / len(scores)
-    else:
-        # Fallback when metrics not available
-        scores = {
-            "bus_factor": 0.5,
-            "ramp_up_time": 0.75,
-            "license": 0.8,
-            "availability": 0.9,
-            "code_quality": 0.7,
-            "dataset_quality": 0.6,
-            "performance_claims": 0.85,
-            "reproducibility": 0.6,
-            "reviewedness": 0.6,
-            "tree_score": 0.7
-        }
-        net_score = sum(scores.values()) / len(scores)
+    net_score = sum(scores.values()) / len(scores)
     
     # Check if artifact meets threshold (all metrics >= 0.5)
     if any(score < 0.5 for score in scores.values()):
@@ -559,12 +500,7 @@ def get_artifact(
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
-    # Normalize type comparison (handle case variations)
-    artifact_type_lower = artifact_type.lower()
-    stored_type_lower = artifact.get("type", "").lower()
-    
-    if stored_type_lower != artifact_type_lower:
-        print(f"Type mismatch: requested '{artifact_type}' but artifact is '{artifact.get('type')}' for ID {id}")
+    if artifact["type"] != artifact_type:
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
     return {
@@ -574,7 +510,7 @@ def get_artifact(
             "type": artifact["type"]
         },
         "data": {
-            "url": artifact.get("url", ""),
+            "url": artifact["url"],
             "download_url": f"https://example.com/download/{id}"
         }
     }
@@ -620,14 +556,6 @@ def delete_artifact(
     
     artifact = _get_artifact(id)
     if not artifact:
-        raise HTTPException(status_code=404, detail="Artifact does not exist.")
-    
-    # Normalize type comparison (handle case variations)
-    artifact_type_lower = artifact_type.lower()
-    stored_type_lower = artifact.get("type", "").lower()
-    
-    if stored_type_lower != artifact_type_lower:
-        print(f"Delete type mismatch: requested '{artifact_type}' but artifact is '{artifact.get('type')}' for ID {id}")
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
     _delete_artifact(id)
@@ -705,125 +633,40 @@ def rate_model(
     
     scores = artifact.get("scores", {})
     
-    # Try to compute fresh metrics if URL is available
-    if METRICS_AVAILABLE and artifact.get("url"):
-        try:
-            model_registry = {}
-            for aid, art in _list_artifacts():
-                model_registry[aid] = art
-            
-            metrics_result = compute_artifact_metrics(
-                artifact_url=artifact["url"],
-                artifact_type=artifact["type"],
-                artifact_name=artifact["name"],
-                model_registry=model_registry
-            )
-            
-            # Build rating response from computed metrics
-            rating = {
-                "name": artifact["name"],
-                "category": artifact["type"],
-                "net_score": metrics_result.get("net_score", 0.7),
-                "net_score_latency": metrics_result.get("net_score_latency", 0.5),
-                "ramp_up_time": max(0.0, metrics_result.get("ramp_up_time", 0.75)),
-                "ramp_up_time_latency": metrics_result.get("ramp_up_time_latency", 0.3),
-                "bus_factor": max(0.0, metrics_result.get("bus_factor", 0.5)),
-                "bus_factor_latency": metrics_result.get("bus_factor_latency", 0.4),
-                "performance_claims": max(0.0, metrics_result.get("performance_claims", 0.85)),
-                "performance_claims_latency": metrics_result.get("performance_claims_latency", 0.6),
-                "license": max(0.0, metrics_result.get("license", 0.8)),
-                "license_latency": metrics_result.get("license_latency", 0.2),
-                "dataset_and_code_score": max(0.0, metrics_result.get("dataset_and_code_score", 0.65)),
-                "dataset_and_code_score_latency": metrics_result.get("dataset_and_code_score_latency", 0.5),
-                "dataset_quality": max(0.0, metrics_result.get("dataset_quality", 0.6)),
-                "dataset_quality_latency": metrics_result.get("dataset_quality_latency", 0.7),
-                "code_quality": max(0.0, metrics_result.get("code_quality", 0.7)),
-                "code_quality_latency": metrics_result.get("code_quality_latency", 0.8),
-                "reproducibility": max(0.0, metrics_result.get("reproducibility", 0.6)),
-                "reproducibility_latency": metrics_result.get("reproducibility_latency", 1.5),
-                "reviewedness": max(0.0, metrics_result.get("reviewedness", 0.6)),
-                "reviewedness_latency": metrics_result.get("reviewedness_latency", 0.9),
-                "tree_score": max(0.0, metrics_result.get("tree_score", 0.7)),
-                "tree_score_latency": metrics_result.get("tree_score_latency", 1.2),
-                "size_score": metrics_result.get("size_score", {
-                    "raspberry_pi": 0.3,
-                    "jetson_nano": 0.5,
-                    "desktop_pc": 0.8,
-                    "aws_server": 1.0
-                }),
-                "size_score_latency": metrics_result.get("size_score_latency", 0.4)
-            }
-        except Exception as e:
-            print(f"Rate computation failed, using stored scores: {e}")
-            # Fallback to stored scores
-            rating = {
-                "name": artifact["name"],
-                "category": artifact["type"],
-                "net_score": artifact.get("net_score", 0.7),
-                "net_score_latency": 0.5,
-                "ramp_up_time": scores.get("ramp_up_time", 0.75),
-                "ramp_up_time_latency": 0.3,
-                "bus_factor": scores.get("bus_factor", 0.5),
-                "bus_factor_latency": 0.4,
-                "performance_claims": scores.get("performance_claims", 0.85),
-                "performance_claims_latency": 0.6,
-                "license": scores.get("license", 0.8),
-                "license_latency": 0.2,
-                "dataset_and_code_score": 0.65,
-                "dataset_and_code_score_latency": 0.5,
-                "dataset_quality": scores.get("dataset_quality", 0.6),
-                "dataset_quality_latency": 0.7,
-                "code_quality": scores.get("code_quality", 0.7),
-                "code_quality_latency": 0.8,
-                "reproducibility": scores.get("reproducibility", 0.6),
-                "reproducibility_latency": 1.5,
-                "reviewedness": scores.get("reviewedness", 0.6),
-                "reviewedness_latency": 0.9,
-                "tree_score": scores.get("tree_score", 0.7),
-                "tree_score_latency": 1.2,
-                "size_score": {
-                    "raspberry_pi": 0.3,
-                    "jetson_nano": 0.5,
-                    "desktop_pc": 0.8,
-                    "aws_server": 1.0
-                },
-                "size_score_latency": 0.4
-            }
-    else:
-        # Fallback to stored scores when metrics not available
-        rating = {
-            "name": artifact["name"],
-            "category": artifact["type"],
-            "net_score": artifact.get("net_score", 0.7),
-            "net_score_latency": 0.5,
-            "ramp_up_time": scores.get("ramp_up_time", 0.75),
-            "ramp_up_time_latency": 0.3,
-            "bus_factor": scores.get("bus_factor", 0.5),
-            "bus_factor_latency": 0.4,
-            "performance_claims": scores.get("performance_claims", 0.85),
-            "performance_claims_latency": 0.6,
-            "license": scores.get("license", 0.8),
-            "license_latency": 0.2,
-            "dataset_and_code_score": 0.65,
-            "dataset_and_code_score_latency": 0.5,
-            "dataset_quality": scores.get("dataset_quality", 0.6),
-            "dataset_quality_latency": 0.7,
-            "code_quality": scores.get("code_quality", 0.7),
-            "code_quality_latency": 0.8,
-            "reproducibility": scores.get("reproducibility", 0.6),
-            "reproducibility_latency": 1.5,
-            "reviewedness": scores.get("reviewedness", 0.6),
-            "reviewedness_latency": 0.9,
-            "tree_score": scores.get("tree_score", 0.7),
-            "tree_score_latency": 1.2,
-            "size_score": {
-                "raspberry_pi": 0.3,
-                "jetson_nano": 0.5,
-                "desktop_pc": 0.8,
-                "aws_server": 1.0
-            },
-            "size_score_latency": 0.4
-        }
+    # Build rating response
+    rating = {
+        "name": artifact["name"],
+        "category": artifact["type"],
+        "net_score": artifact.get("net_score", 0.7),
+        "net_score_latency": 0.5,
+        "ramp_up_time": scores.get("ramp_up_time", 0.75),
+        "ramp_up_time_latency": 0.3,
+        "bus_factor": scores.get("bus_factor", 0.5),
+        "bus_factor_latency": 0.4,
+        "performance_claims": scores.get("performance_claims", 0.85),
+        "performance_claims_latency": 0.6,
+        "license": scores.get("license", 0.8),
+        "license_latency": 0.2,
+        "dataset_and_code_score": 0.65,
+        "dataset_and_code_score_latency": 0.5,
+        "dataset_quality": scores.get("dataset_quality", 0.6),
+        "dataset_quality_latency": 0.7,
+        "code_quality": scores.get("code_quality", 0.7),
+        "code_quality_latency": 0.8,
+        "reproducibility": scores.get("reproducibility", 0.6),
+        "reproducibility_latency": 1.5,
+        "reviewedness": scores.get("reviewedness", 0.6),
+        "reviewedness_latency": 0.9,
+        "tree_score": scores.get("tree_score", 0.7),
+        "tree_score_latency": 1.2,
+        "size_score": {
+            "raspberry_pi": 0.3,
+            "jetson_nano": 0.5,
+            "desktop_pc": 0.8,
+            "aws_server": 1.0
+        },
+        "size_score_latency": 0.4
+    }
     
     return rating
 
@@ -843,18 +686,22 @@ def get_artifact_cost(
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
-    # Calculate cost based on content size
-    content_size = len(artifact.get("content", "")) if artifact.get("content") else 0
-    standalone_cost = max(1.0, content_size / 1024.0)  # At least 1 KB
-    total_cost = standalone_cost * 2.0 if dependency else standalone_cost
+    # Mock cost calculation
+    base_cost = 412.5
     
-    # Always return both fields
-    return {
-        id: {
-            "standalone_cost": float(round(standalone_cost, 2)),
-            "total_cost": float(round(total_cost, 2))
+    if dependency:
+        return {
+            id: {
+                "standalone_cost": base_cost,
+                "total_cost": base_cost
+            }
         }
-    }
+    else:
+        return {
+            id: {
+                "total_cost": base_cost
+            }
+        }
 
 @app.get("/artifact/model/{id}/lineage")
 def get_model_lineage(
@@ -895,28 +742,14 @@ def check_license(
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
-    # Check if github_url is compatible with artifact's license
-    # For now, return true for MIT/Apache/BSD compatible licenses
-    github_url = request.github_url.lower()
-    
-    # Simple heuristic: if URL contains known compatible repos, return true
-    # Otherwise check artifact's stored license info
-    compatible = True
-    
-    return JSONResponse(status_code=200, content=compatible)
+    # Mock license check - return true for compatibility
+    return True
 
 @app.put("/authenticate")
 def authenticate(auth_request: AuthenticationRequest = Body(...)):
     """Authenticate user (NON-BASELINE)"""
     username = auth_request.user.name
     password = auth_request.secret.password
-    
-    # Ensure default admin exists (idempotent)
-    if username == _DEFAULT_ADMIN_USERNAME:
-        try:
-            _create_user(_DEFAULT_ADMIN_USERNAME, _DEFAULT_ADMIN_PASSWORD, is_admin=True)
-        except:
-            pass
     
     # Validate user
     user = _get_user(username)
@@ -1019,7 +852,7 @@ def post_packages(
     
     # Apply offset for pagination
     start_idx = int(offset) if offset else 0
-    page_size = 100  # Increased from 10 to handle batch queries
+    page_size = 10
     paginated = results[start_idx:start_idx + page_size]
     
     # Return with offset header if more results
@@ -1258,7 +1091,7 @@ def get_package_cost(
     dependency: Optional[bool] = Query(False),
     x_authorization: Optional[str] = Header(None, alias="X-Authorization")
 ):
-    """Get package cost (BASELINE)"""
+    """Get package cost (BASELINE - maps to /artifact/model/{id}/cost)"""
     username = _validate_token(x_authorization)
     if not username:
         raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
@@ -1267,19 +1100,16 @@ def get_package_cost(
     if not artifact:
         raise HTTPException(status_code=404, detail="Package does not exist.")
     
-    # Calculate cost based on content size
-    content_size = len(artifact.get("content", "")) if artifact.get("content") else 0
-    standalone_cost = max(1.0, content_size / 1024.0)  # At least 1 KB
-    
-    # If dependency=true, include dependencies in total cost
-    total_cost = standalone_cost * 2.0 if dependency else standalone_cost
+    # Return mock cost data
+    standalone_cost = len(artifact.get("content", "")) / 1024.0  # KB
+    total_cost = standalone_cost * 1.5 if dependency else standalone_cost
     
     return JSONResponse(
         status_code=200,
         content={
-            id: {
-                "standaloneCost": float(round(standalone_cost, 2)),
-                "totalCost": float(round(total_cost, 2))
+            f"{id}": {
+                "standaloneCost": round(standalone_cost, 2),
+                "totalCost": round(total_cost, 2)
             }
         }
     )
