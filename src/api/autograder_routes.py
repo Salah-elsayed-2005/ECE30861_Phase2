@@ -429,9 +429,8 @@ def create_artifact(
     if not artifact_data.url:
         raise HTTPException(status_code=400, detail="Missing url in artifact_data.")
     
-    # Extract name from URL
-    parts = artifact_data.url.rstrip('/').split('/')
-    name = parts[-1] if parts else "unknown"
+    # Extract name from URL using improved extraction
+    name = _extract_artifact_name(artifact_data.url)
     
     # Generate ID
     artifact_id = _generate_artifact_id()
