@@ -472,17 +472,9 @@ def create_artifact(
     if not artifact_data.url:
         raise HTTPException(status_code=400, detail="Missing url in artifact_data.")
     
-    # Extract name from URL (handle HuggingFace/GitHub patterns)
-    url = artifact_data.url.rstrip('/')
-    parts = url.split('/')
-    
-    # For HuggingFace (huggingface.co/org/model) or GitHub (github.com/org/repo)
-    if len(parts) >= 2 and ('huggingface.co' in url or 'github.com' in url):
-        # Get last two parts (org/name)
-        name = '/'.join(parts[-2:])
-    else:
-        # Default: just last part
-        name = parts[-1] if parts else "unknown"
+    # Extract name from URL (simple: just last part)
+    parts = artifact_data.url.rstrip('/').split('/')
+    name = parts[-1] if parts else "unknown"
     
     # Generate ID
     artifact_id = _generate_artifact_id()
