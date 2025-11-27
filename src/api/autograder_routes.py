@@ -708,7 +708,7 @@ def get_artifact_by_regex(
         raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
     
     try:
-        pattern = re.compile(regex_query.regex, re.IGNORECASE)
+        pattern = re.compile(regex_query.regex)
     except re.error:
         raise HTTPException(status_code=400, detail="Invalid regex pattern.")
     
