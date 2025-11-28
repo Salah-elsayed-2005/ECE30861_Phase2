@@ -69,7 +69,8 @@ class ArtifactQuery(BaseModel):
     types: Optional[List[str]] = None
 
 class ArtifactRegEx(BaseModel):
-    regex: str
+    model_config = ConfigDict(populate_by_name=True)
+    regex: str = Field(alias="RegEx")
 
 class User(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
