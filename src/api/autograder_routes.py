@@ -722,7 +722,7 @@ def get_artifact_by_regex(
             })
     
     # Return empty array if no matches (don't raise 404)
-    return results
+    return JSONResponse(status_code=200, content=results)
 
 @app.get("/artifact/model/{id}/rate")
 def rate_model(
