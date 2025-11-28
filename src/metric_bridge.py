@@ -121,28 +121,22 @@ class MetricsBridge:
         
         # Initialize all metrics
         metrics_to_compute = {
-            'bus_factor': BusFactorMetric(git_client=self.git_client),
-            'ramp_up_time': RampUpTimeMetric(
+            'bus_factor': BusFactorMetric(
                 hf_client=self.hf_client,
-                purdue_client=self.purdue_client
+                grok_client=self.purdue_client
             ),
-            'license': LicenseMetric(hf_client=self.hf_client),
-            'availability': AvailabilityMetric(git_client=self.git_client),
+            'ramp_up_time': RampUpTimeMetric(),
+            'license': LicenseMetric(),
+            'availability': AvailabilityMetric(),
             'code_quality': CodeQualityMetric(
-                git_client=self.git_client,
-                purdue_client=self.purdue_client
+                hf_client=self.hf_client,
+                grok_client=self.purdue_client
             ),
             'dataset_quality': DatasetQualityMetric(hf_client=self.hf_client),
-            'performance_claims': PerformanceClaimsMetric(
-                hf_client=self.hf_client,
-                purdue_client=self.purdue_client
-            ),
-            'size': SizeMetric(hf_client=self.hf_client),
-            'reproducibility': ReproducibilityMetric(
-                hf_client=self.hf_client,
-                purdue_client=self.purdue_client
-            ),
-            'reviewedness': ReviewednessMetric(git_client=self.git_client),
+            'performance_claims': PerformanceClaimsMetric(),
+            'size': SizeMetric(),
+            'reproducibility': ReproducibilityMetric(),
+            'reviewedness': ReviewednessMetric(),
             'tree_score': TreescoreMetric(
                 hf_client=self.hf_client,
                 model_registry=self.model_registry
