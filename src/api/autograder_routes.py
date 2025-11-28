@@ -219,6 +219,41 @@ def _generate_artifact_id() -> str:
     """Generate unique artifact ID"""
     return str(abs(hash(uuid.uuid4().hex + str(time.time()))))[:12]
 
+def _detect_artifact_type(url: str, suggested_type: str) -> str:
+    """Intelligently detect artifact type from URL.
+    
+    Args:
+        url: The artifact URL
+        suggested_type: The type from the API path (may be incorrect)
+    
+    Returns:
+        The detected type: 'model', 'dataset', or 'code'
+    """
+    url_lower = url.lower()
+    
+    # Strong indicators for code
+    if any(x in url_lower for x in ['.git', 'github.com', 'gitlab.com', '/git/', 'git/']):
+        return 'code'
+    
+    # Strong indicators for dataset
+    if any(x in url_lower for x in ['/datasets/', 'dataset']):
+        return 'dataset'
+    
+    # HuggingFace URL patterns
+    if 'huggingface.co' in url_lower:
+        # huggingface.co/datasets/name -> dataset
+        if '/datasets/' in url_lower:
+            return 'dataset'
+        # huggingface.co/spaces/name -> code
+        elif '/spaces/' in url_lower:
+            return 'code'
+        # huggingface.co/name (default to model)
+        else:
+            return 'model'
+    
+    # Fall back to suggested type if no clear indicators
+    return suggested_type.lower()
+
 def _store_artifact(artifact_id: str, artifact_data: Dict[str, Any]):
     """Store artifact in DynamoDB or memory"""
     if AWS_AVAILABLE:
@@ -477,6 +512,11 @@ def create_artifact(
     parts = artifact_data.url.rstrip('/').split('/')
     name = parts[-1] if parts else "unknown"
     
+    # Detect actual artifact type from URL (may differ from path parameter)
+    detected_type = _detect_artifact_type(artifact_data.url, artifact_type)
+    if detected_type != artifact_type.lower():
+        print(f"Type mismatch detected: path={artifact_type}, detected={detected_type}, url={artifact_data.url}")
+    
     # Generate ID
     artifact_id = _generate_artifact_id()
     
@@ -554,10 +594,10 @@ def create_artifact(
         }
         net_score = sum(scores.values()) / len(scores)
     
-    # Store artifact (preserve original case of artifact_type)
+    # Store artifact with detected type (not path parameter)
     artifact = {
         "name": name,
-        "type": artifact_type,  # Store with original case from URL
+        "type": detected_type,  # Use detected type, not path parameter
         "url": artifact_data.url,
         "scores": scores,
         "net_score": net_score,
@@ -573,7 +613,7 @@ def create_artifact(
         "metadata": {
             "name": name,
             "id": artifact_id,
-            "type": artifact_type  # Return with original case
+            "type": detected_type  # Return detected type
         },
         "data": {
             "url": artifact_data.url,
@@ -598,8 +638,13 @@ def get_artifact(
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
-    # Don't validate type - just return the artifact
-    # The autograder may query with different types than what was uploaded
+    # Validate type (now that we detect types correctly during upload)
+    artifact_type_lower = artifact_type.lower()
+    stored_type_lower = artifact.get("type", "").lower()
+    
+    if stored_type_lower != artifact_type_lower:
+        print(f"Type mismatch: requested '{artifact_type}' but artifact is '{artifact.get('type')}' for ID {id}")
+        raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
     return {
         "metadata": {
@@ -656,7 +701,13 @@ def delete_artifact(
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
-    # Don't validate type - just delete the artifact
+    # Validate type
+    artifact_type_lower = artifact_type.lower()
+    stored_type_lower = artifact.get("type", "").lower()
+    
+    if stored_type_lower != artifact_type_lower:
+        print(f"Delete type mismatch: requested '{artifact_type}' but artifact is '{artifact.get('type')}' for ID {id}")
+        raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
     _delete_artifact(id)
     
