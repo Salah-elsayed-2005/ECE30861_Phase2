@@ -23,7 +23,7 @@ print(f"  First 30 chars: {password[:30]}...")
 print(f"  Last 20 chars: ...{password[-20:]}")
 
 salt = uuid.uuid4().hex
-pw_hash = hashlib.sha256((salt + password).encode('utf-8')).hexdigest()
+pw_hash = hashlib.sha256((salt + password).encode('utf-8')).hexdigest()  # SALT + PASSWORD order to match Lambda!
 
 from datetime import datetime
 table.put_item(Item={
