@@ -199,6 +199,7 @@ def _generate_artifact_id() -> str:
 
 def _store_artifact(artifact_id: str, artifact_data: Dict[str, Any]):
     """Store artifact in DynamoDB or memory"""
+    print(f"[STORE] Storing artifact {artifact_id}: {artifact_data.get('name', 'N/A')}")
     if AWS_AVAILABLE:
         try:
             # Convert floats to Decimal for DynamoDB
@@ -212,11 +213,13 @@ def _store_artifact(artifact_id: str, artifact_data: Dict[str, Any]):
                     item[key] = value
             
             table.put_item(Item=item)
+            print(f"[STORE] Successfully stored in DynamoDB: ARTIFACT#{artifact_id}")
             return
         except Exception as e:
-            print(f"DynamoDB error, falling back to memory: {e}")
+            print(f"[STORE] DynamoDB error, falling back to memory: {e}")
     
     _artifacts_store[artifact_id] = artifact_data
+    print(f"[STORE] Stored in memory: {artifact_id}")
 
 def _get_artifact(artifact_id: str) -> Optional[Dict[str, Any]]:
     """Get artifact from DynamoDB or memory"""
@@ -369,6 +372,10 @@ def list_artifacts_query(
     x_authorization: Optional[str] = Header(None, alias="X-Authorization")
 ):
     """Get artifacts from registry (BASELINE)"""
+    print(f"[QUERY] POST /artifacts with {len(queries)} queries")
+    for i, q in enumerate(queries):
+        print(f"[QUERY]   Query {i}: name='{q.name}', types={q.types}")
+    
     username = _validate_token(x_authorization)
     if not username:
         raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
@@ -377,6 +384,7 @@ def list_artifacts_query(
     
     # Get all artifacts
     all_artifacts = _list_artifacts()
+    print(f"[QUERY] Found {len(all_artifacts)} total artifacts in storage")
     
     # Handle wildcard query
     if len(queries) == 1 and queries[0].name == "*":
@@ -399,6 +407,8 @@ def list_artifacts_query(
                             id=artifact_id,
                             type=artifact["type"]
                         ))
+    
+    print(f"[QUERY] Returning {len(results)} results")
     
     # Apply offset for pagination
     start_idx = int(offset) if offset else 0
