@@ -444,9 +444,16 @@ def create_artifact(
     if not artifact_data.url:
         raise HTTPException(status_code=400, detail="Missing url in artifact_data.")
     
-    # Extract name from URL
+    # Extract name from URL (use owner-repo format for GitHub URLs)
     parts = artifact_data.url.rstrip('/').split('/')
-    name = parts[-1] if parts else "unknown"
+    if 'github.com' in artifact_data.url and len(parts) >= 2:
+        # GitHub URL: extract owner-repo (e.g., "google-research-bert")
+        owner = parts[-2] if len(parts) >= 2 else ""
+        repo = parts[-1] if parts else ""
+        name = f"{owner}-{repo}" if owner and repo else (repo or "unknown")
+    else:
+        # Other URLs: use last segment
+        name = parts[-1] if parts else "unknown"
     
     # Generate ID
     artifact_id = _generate_artifact_id()
