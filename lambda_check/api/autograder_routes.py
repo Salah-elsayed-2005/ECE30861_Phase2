@@ -197,6 +197,27 @@ def _generate_artifact_id() -> str:
     """Generate unique artifact ID"""
     return str(abs(hash(uuid.uuid4().hex + str(time.time()))))[:12]
 
+def _extract_artifact_name(url: str) -> str:
+    """Extract artifact name from URL"""
+    # Remove trailing slash and .git suffix
+    url = url.rstrip('/').replace('.git', '')
+    
+    # Split URL into parts
+    parts = url.split('/')
+    
+    # Handle GitHub URLs: github.com/owner/repo or github.com/owner/repo/tree/branch
+    if 'github.com' in url and len(parts) >= 5:
+        owner = parts[-2] if 'tree' not in parts else parts[-4]
+        repo = parts[-1] if 'tree' not in parts else parts[-3]
+        return f"{owner}-{repo}"
+    
+    # Handle HuggingFace URLs: huggingface.co/owner/model-name
+    elif 'huggingface.co' in url and len(parts) >= 3:
+        return f"{parts[-2]}-{parts[-1]}"
+    
+    # Default: use last part of URL
+    return parts[-1] if parts else "unknown"
+
 def _store_artifact(artifact_id: str, artifact_data: Dict[str, Any]):
     """Store artifact in DynamoDB or memory"""
     if AWS_AVAILABLE:
