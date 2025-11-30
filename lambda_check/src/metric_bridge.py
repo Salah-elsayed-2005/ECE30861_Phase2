@@ -7,18 +7,15 @@ import os
 from typing import Dict, Any, Optional
 from urllib.parse import urlparse
 
-# Add parent directories to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-
-from src.Metrics import (
+# Import from same directory (lambda_check/src/)
+from Metrics import (
     BusFactorMetric, RampUpTimeMetric, LicenseMetric,
     AvailabilityMetric, CodeQualityMetric, DatasetQualityMetric,
     PerformanceClaimsMetric, SizeMetric,
     ReproducibilityMetric, ReviewednessMetric, TreescoreMetric
 )
-from src.Client import HFClient, GitClient, PurdueClient
-from src.logging_utils import get_logger
-from src.utils import browse_hf_repo
+from Client import HFClient, GitClient, PurdueClient
+from logging_utils import get_logger
 
 logger = get_logger(__name__)
 
@@ -95,15 +92,6 @@ class MetricsBridge:
             "artifact_type": artifact_type,
             "name": artifact_name
         }
-        
-        # Try to get README content for metrics that need it
-        try:
-            if "huggingface.co" in artifact_url:
-                readme_content = self._get_hf_readme(artifact_url)
-                inputs["readme"] = readme_content
-        except Exception as e:
-            logger.warning(f"Could not fetch README: {e}")
-            inputs["readme"] = ""
         
         # Initialize all metrics
         metrics_to_compute = {
@@ -202,21 +190,6 @@ class MetricsBridge:
         elif parts:
             return parts[-1]
         return "unknown"
-    
-    def _get_hf_readme(self, url: str) -> str:
-        """Get README content from HuggingFace model."""
-        try:
-            # Extract model ID from URL
-            parsed = urlparse(url)
-            parts = [p for p in parsed.path.split('/') if p]
-            if len(parts) >= 2:
-                model_id = f"{parts[-2]}/{parts[-1]}"
-                # Use browse_hf_repo to get README
-                content = browse_hf_repo(model_id, self.hf_client)
-                return content
-        except Exception as e:
-            logger.warning(f"Failed to fetch README: {e}")
-        return ""
 
 
 def compute_artifact_metrics(

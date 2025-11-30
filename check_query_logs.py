@@ -4,9 +4,9 @@ from datetime import datetime
 logs = boto3.client('logs', region_name='us-east-1')
 log_group = '/aws/lambda/tmr-dev-api'
 
-# Get logs during byName test time (11:23:21-25)
-start_time = int(datetime(2025, 11, 29, 11, 23, 20).timestamp() * 1000)
-end_time = int(datetime(2025, 11, 29, 11, 23, 26).timestamp() * 1000)
+# Get logs during All Artifacts Query Test (11:53:21-23)
+start_time = int(datetime(2025, 11, 29, 11, 53, 21).timestamp() * 1000)
+end_time = int(datetime(2025, 11, 29, 11, 53, 23).timestamp() * 1000)
 
 print(f"Checking logs from {datetime.fromtimestamp(start_time/1000)} to {datetime.fromtimestamp(end_time/1000)}\n")
 
