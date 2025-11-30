@@ -401,14 +401,19 @@ def list_artifacts_query(
     # Get all artifacts
     all_artifacts = _list_artifacts()
     
-    # Handle wildcard query
+    # Handle wildcard query - return ALL results without pagination
     if len(queries) == 1 and queries[0].name == "*":
+        query = queries[0]
         for artifact_id, artifact in all_artifacts:
-            results.append({
-                "name": artifact["name"],
-                "id": artifact_id,
-                "type": artifact["type"]
-            })
+            # Apply type filter if specified
+            if query.types is None or artifact["type"] in query.types:
+                results.append({
+                    "name": artifact["name"],
+                    "id": artifact_id,
+                    "type": artifact["type"]
+                })
+        # For wildcard, return everything without pagination
+        return JSONResponse(status_code=200, content=results)
     else:
         # Handle specific queries
         for query in queries:
@@ -421,7 +426,7 @@ def list_artifacts_query(
                             "type": artifact["type"]
                         })
     
-    # Apply offset for pagination
+    # Apply offset for pagination (only for non-wildcard queries)
     start_idx = int(offset) if offset else 0
     page_size = 10
     paginated = results[start_idx:start_idx + page_size]
