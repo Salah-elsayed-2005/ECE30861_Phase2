@@ -117,9 +117,9 @@ _users_store: Dict[str, Dict[str, str]] = {}
 
 SESSION_TTL_SECONDS = 3600
 
-# Seed default admin
+# Seed default admin - EXACT password from OpenAPI spec line 560
 _DEFAULT_ADMIN_USERNAME = 'ece30861defaultadminuser'
-_DEFAULT_ADMIN_PASSWORD = '''correcthorsebatterystaple123(!__+@**(A'"`;DROP TABLE packages;'''
+_DEFAULT_ADMIN_PASSWORD = 'correcthorsebatterystaple123(!__+@**(A\'"`;DROP TABLE artifacts;'
 
 def _hash_password(password: str, salt: str) -> str:
     return hashlib.sha256((salt + password).encode('utf-8')).hexdigest()
@@ -199,7 +199,6 @@ def _generate_artifact_id() -> str:
 
 def _store_artifact(artifact_id: str, artifact_data: Dict[str, Any]):
     """Store artifact in DynamoDB or memory"""
-    print(f"[STORE] Storing artifact {artifact_id}: {artifact_data.get('name', 'N/A')}")
     if AWS_AVAILABLE:
         try:
             # Convert floats to Decimal for DynamoDB
@@ -213,13 +212,11 @@ def _store_artifact(artifact_id: str, artifact_data: Dict[str, Any]):
                     item[key] = value
             
             table.put_item(Item=item)
-            print(f"[STORE] Successfully stored in DynamoDB: ARTIFACT#{artifact_id}")
             return
         except Exception as e:
-            print(f"[STORE] DynamoDB error, falling back to memory: {e}")
+            print(f"DynamoDB error, falling back to memory: {e}")
     
     _artifacts_store[artifact_id] = artifact_data
-    print(f"[STORE] Stored in memory: {artifact_id}")
 
 def _get_artifact(artifact_id: str) -> Optional[Dict[str, Any]]:
     """Get artifact from DynamoDB or memory"""
@@ -322,7 +319,7 @@ def _clear_all_users():
 # Seed admin user
 try:
     _create_user(_DEFAULT_ADMIN_USERNAME, _DEFAULT_ADMIN_PASSWORD, is_admin=True)
-    print(f"[OK] Seeded admin user: {_DEFAULT_ADMIN_USERNAME}")
+    print(f"✓ Seeded admin user: {_DEFAULT_ADMIN_USERNAME}")
 except ValueError:
     pass
 
@@ -372,10 +369,6 @@ def list_artifacts_query(
     x_authorization: Optional[str] = Header(None, alias="X-Authorization")
 ):
     """Get artifacts from registry (BASELINE)"""
-    print(f"[QUERY] POST /artifacts with {len(queries)} queries")
-    for i, q in enumerate(queries):
-        print(f"[QUERY]   Query {i}: name='{q.name}', types={q.types}")
-    
     username = _validate_token(x_authorization)
     if not username:
         raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
@@ -384,31 +377,26 @@ def list_artifacts_query(
     
     # Get all artifacts
     all_artifacts = _list_artifacts()
-    print(f"[QUERY] Found {len(all_artifacts)} total artifacts in storage")
     
     # Handle wildcard query
     if len(queries) == 1 and queries[0].name == "*":
         for artifact_id, artifact in all_artifacts:
-            # Apply type filter even for wildcard
-            if queries[0].types is None or artifact["type"] in queries[0].types:
-                results.append(ArtifactMetadata(
-                    name=artifact["name"],
-                    id=artifact_id,
-                    type=artifact["type"]
-                ))
+            results.append({
+                "name": artifact["name"],
+                "id": artifact_id,
+                "type": artifact["type"]
+            })
     else:
         # Handle specific queries
         for query in queries:
             for artifact_id, artifact in all_artifacts:
                 if artifact["name"] == query.name:
                     if query.types is None or artifact["type"] in query.types:
-                        results.append(ArtifactMetadata(
-                            name=artifact["name"],
-                            id=artifact_id,
-                            type=artifact["type"]
-                        ))
-    
-    print(f"[QUERY] Returning {len(results)} results")
+                        results.append({
+                            "name": artifact["name"],
+                            "id": artifact_id,
+                            "type": artifact["type"]
+                        })
     
     # Apply offset for pagination
     start_idx = int(offset) if offset else 0
@@ -418,12 +406,9 @@ def list_artifacts_query(
     # Return with offset header
     next_offset = str(start_idx + page_size) if start_idx + page_size < len(results) else None
     
-    # Convert Pydantic models to dicts for JSONResponse
-    paginated_dicts = [item.model_dump() for item in paginated]
-    
     return JSONResponse(
         status_code=200,
-        content=paginated_dicts,
+        content=paginated,
         headers={"offset": next_offset} if next_offset else {}
     )
 
@@ -444,16 +429,8 @@ def create_artifact(
     if not artifact_data.url:
         raise HTTPException(status_code=400, detail="Missing url in artifact_data.")
     
-    # Extract name from URL (use owner-repo format for GitHub URLs)
-    parts = artifact_data.url.rstrip('/').split('/')
-    if 'github.com' in artifact_data.url and len(parts) >= 2:
-        # GitHub URL: extract owner-repo (e.g., "google-research-bert")
-        owner = parts[-2] if len(parts) >= 2 else ""
-        repo = parts[-1] if parts else ""
-        name = f"{owner}-{repo}" if owner and repo else (repo or "unknown")
-    else:
-        # Other URLs: use last segment
-        name = parts[-1] if parts else "unknown"
+    # Extract name from URL using improved extraction
+    name = _extract_artifact_name(artifact_data.url)
     
     # Generate ID
     artifact_id = _generate_artifact_id()
@@ -584,29 +561,31 @@ def delete_artifact(
     
     return JSONResponse(status_code=200, content={"message": "Artifact is deleted."})
 
-@app.get("/artifact/byName/{name:path}", response_model=list[ArtifactMetadata])
+@app.get("/artifact/byName/{name}")
 def get_artifact_by_name(
     name: str,
     x_authorization: Optional[str] = Header(None, alias="X-Authorization")
 ):
     """Get artifacts by name (NON-BASELINE)"""
-    # Note: OpenAPI spec says X-Authorization required, but accept optionally for autograder
+    username = _validate_token(x_authorization)
+    if not username:
+        raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
     
     results = []
     for artifact_id, artifact in _list_artifacts():
         if artifact["name"] == name:
-            results.append(ArtifactMetadata(
-                name=artifact["name"],
-                id=artifact_id,
-                type=artifact["type"]
-            ))
+            results.append({
+                "name": artifact["name"],
+                "id": artifact_id,
+                "type": artifact["type"]
+            })
     
     if not results:
         raise HTTPException(status_code=404, detail="No such artifact.")
     
     return results
 
-@app.post("/artifact/byRegEx", response_model=list[ArtifactMetadata])
+@app.post("/artifact/byRegEx")
 def get_artifact_by_regex(
     regex_query: ArtifactRegEx = Body(...),
     x_authorization: Optional[str] = Header(None, alias="X-Authorization")
@@ -614,7 +593,9 @@ def get_artifact_by_regex(
     """Search artifacts by regex (BASELINE)"""
     import re
     
-    # Note: Accept auth optionally for autograder compatibility
+    username = _validate_token(x_authorization)
+    if not username:
+        raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
     
     try:
         pattern = re.compile(regex_query.regex, re.IGNORECASE)
@@ -624,11 +605,11 @@ def get_artifact_by_regex(
     results = []
     for artifact_id, artifact in _list_artifacts():
         if pattern.search(artifact["name"]):
-            results.append(ArtifactMetadata(
-                name=artifact["name"],
-                id=artifact_id,
-                type=artifact["type"]
-            ))
+            results.append({
+                "name": artifact["name"],
+                "id": artifact_id,
+                "type": artifact["type"]
+            })
     
     if not results:
         raise HTTPException(status_code=404, detail="No artifact found under this regex.")
@@ -768,13 +749,6 @@ def authenticate(auth_request: AuthenticationRequest = Body(...)):
     """Authenticate user (NON-BASELINE)"""
     username = auth_request.user.name
     password = auth_request.secret.password
-    
-    # Ensure default admin exists (idempotent)
-    if username == _DEFAULT_ADMIN_USERNAME:
-        try:
-            _create_user(_DEFAULT_ADMIN_USERNAME, _DEFAULT_ADMIN_PASSWORD, is_admin=True)
-        except:
-            pass
     
     # Validate user
     user = _get_user(username)
@@ -967,8 +941,7 @@ def get_package_by_name(
             results.append({
                 "Version": artifact.get("version", "1.0.0"),
                 "Name": artifact["name"],
-                "ID": artifact_id,
-                "type": artifact.get("type", "model")  # Include type field for OpenAPI compliance
+                "ID": artifact_id
             })
     
     if not results:
