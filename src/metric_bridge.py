@@ -125,14 +125,14 @@ class MetricsBridge:
                 hf_client=self.hf_client,
                 grok_client=self.purdue_client
             ),
-            'ramp_up_time': RampUpTimeMetric(),
+            'ramp_up_time': RampUpTime(),
             'license': LicenseMetric(),
             'availability': AvailabilityMetric(),
-            'code_quality': CodeQualityMetric(
+            'code_quality': CodeQuality(
                 hf_client=self.hf_client,
                 grok_client=self.purdue_client
             ),
-            'dataset_quality': DatasetQualityMetric(hf_client=self.hf_client),
+            'dataset_quality': DatasetQuality(hf_client=self.hf_client),
             'performance_claims': PerformanceClaimsMetric(),
             'size': SizeMetric(),
             'reproducibility': ReproducibilityMetric(),

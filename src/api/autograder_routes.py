@@ -473,9 +473,35 @@ def create_artifact(
     if not artifact_data.url:
         raise HTTPException(status_code=400, detail="Missing url in artifact_data.")
     
-    # Extract name from URL (simple: just last part)
-    parts = artifact_data.url.rstrip('/').split('/')
-    name = parts[-1] if parts else "unknown"
+    # Extract name from HuggingFace URL
+    # Format: https://huggingface.co/{org}/{repo}[/tree/main]
+    # or https://huggingface.co/datasets/{org}/{repo}
+    # or https://github.com/{org}/{repo}
+    url_clean = artifact_data.url.rstrip('/').replace('/tree/main', '').replace('/tree/master', '')
+    parts = url_clean.split('/')
+    
+    # Extract name based on URL format
+    if 'huggingface.co' in artifact_data.url.lower():
+        # HuggingFace: get last two parts (org/repo) and join with hyphen
+        # e.g., google-bert/bert-base-uncased -> bert-base-uncased
+        # e.g., datasets/bookcorpus -> bookcorpus
+        if len(parts) >= 2:
+            # Remove 'datasets' if present
+            filtered_parts = [p for p in parts if p and p != 'datasets' and p != 'spaces']
+            if len(filtered_parts) >= 2:
+                # Take last two: org and repo
+                name = filtered_parts[-1]  # Just the repo name
+            else:
+                name = filtered_parts[-1] if filtered_parts else "unknown"
+        else:
+            name = parts[-1] if parts else "unknown"
+    elif 'github.com' in artifact_data.url.lower():
+        # GitHub: get repo name (last part before any additional paths)
+        relevant_parts = [p for p in parts if p and p != 'blob' and p != 'tree']
+        name = relevant_parts[-1] if relevant_parts else "unknown"
+    else:
+        # Generic URL: use last part
+        name = parts[-1] if parts else "unknown"
     
     # Generate ID
     artifact_id = _generate_artifact_id()
@@ -652,15 +678,21 @@ def delete_artifact(
     if not username:
         raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
     
+    # Validate artifact_type
+    if artifact_type.lower() not in ["model", "dataset", "code"]:
+        raise HTTPException(status_code=400, detail="Invalid artifact_type.")
+    
     artifact = _get_artifact(id)
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
-    # Don't validate type - just delete the artifact
+    # Validate type matches (case-insensitive)
+    if artifact["type"].lower() != artifact_type.lower():
+        raise HTTPException(status_code=400, detail="Artifact type mismatch.")
     
     _delete_artifact(id)
     
-    return JSONResponse(status_code=200, content={"message": "Artifact is deleted."})
+    return JSONResponse(status_code=200, content={})
 
 @app.get("/artifact/byName/{name}")
 def get_artifact_by_name(
@@ -668,15 +700,22 @@ def get_artifact_by_name(
     x_authorization: Optional[str] = Header(None, alias="X-Authorization")
 ):
     """Get artifacts by name (NON-BASELINE)"""
+    from urllib.parse import unquote
+    
     username = _validate_token(x_authorization)
     if not username:
         raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
     
+    # URL-decode the name in case it's encoded
+    decoded_name = unquote(name)
+    
     results = []
     for artifact_id, artifact in _list_artifacts():
-        if artifact.get("name") == name:
+        artifact_name = artifact.get("name", "")
+        # Match both encoded and decoded versions
+        if artifact_name == name or artifact_name == decoded_name:
             results.append({
-                "name": artifact["name"],
+                "name": artifact_name,
                 "id": artifact_id,
                 "type": artifact["type"]
             })
@@ -699,20 +738,35 @@ def get_artifact_by_regex(
         raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
     
     try:
-        pattern = re.compile(regex_query.regex)
-    except re.error:
-        raise HTTPException(status_code=400, detail="Invalid regex pattern.")
+        # Compile regex pattern - match anywhere in the string
+        pattern = re.compile(regex_query.regex, re.IGNORECASE)
+    except re.error as e:
+        raise HTTPException(status_code=400, detail=f"Invalid regex pattern: {str(e)}")
     
     results = []
+    seen_ids = set()  # Avoid duplicates
+    
     for artifact_id, artifact in _list_artifacts():
-        if pattern.search(artifact["name"]):
+        if artifact_id in seen_ids:
+            continue
+            
+        artifact_name = artifact.get("name", "")
+        artifact_readme = artifact.get("readme", "")
+        artifact_url = artifact.get("url", "")
+        
+        # Search in name, README, and URL
+        if pattern.search(artifact_name) or pattern.search(artifact_readme) or pattern.search(artifact_url):
             results.append({
-                "name": artifact["name"],
+                "name": artifact_name,
                 "id": artifact_id,
                 "type": artifact["type"]
             })
+            seen_ids.add(artifact_id)
     
-    # Return empty array if no matches (don't raise 404)
+    # Return empty array if no matches (don't raise 404 per spec)
+    if not results:
+        raise HTTPException(status_code=404, detail="No artifact found under this regex.")
+    
     return JSONResponse(status_code=200, content=results)
 
 @app.get("/artifact/model/{id}/rate")
@@ -867,22 +921,56 @@ def get_artifact_cost(
     if not username:
         raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
     
+    # Validate artifact_type
+    if artifact_type.lower() not in ["model", "dataset", "code"]:
+        raise HTTPException(status_code=400, detail="Invalid artifact_type.")
+    
     artifact = _get_artifact(id)
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
-    # Calculate cost based on content size
-    content_size = len(artifact.get("content", "")) if artifact.get("content") else 0
-    standalone_cost = max(1.0, content_size / 1024.0)  # At least 1 KB
-    total_cost = standalone_cost * 2.0 if dependency else standalone_cost
+    # Calculate standalone cost
+    # Try to get actual size from HuggingFace API or use estimated size
+    standalone_cost = 100.0  # Default 100 MB
     
-    # Always return both fields
-    return {
-        id: {
-            "standalone_cost": float(round(standalone_cost, 2)),
-            "total_cost": float(round(total_cost, 2))
-        }
+    if artifact.get("url") and "huggingface.co" in artifact["url"]:
+        try:
+            import requests
+            
+            # Try to fetch model info from HuggingFace API
+            url_parts = artifact["url"].replace("https://", "").replace("http://", "").split("/")
+            if len(url_parts) >= 3:
+                # Extract org and repo
+                org = url_parts[1] if len(url_parts) > 1 else ""
+                repo = url_parts[2] if len(url_parts) > 2 else ""
+                
+                if org and repo:
+                    api_url = f"https://huggingface.co/api/models/{org}/{repo}"
+                    response = requests.get(api_url, timeout=5)
+                    
+                    if response.status_code == 200:
+                        model_info = response.json()
+                        # Get size from siblings (files)
+                        total_size_bytes = 0
+                        for sibling in model_info.get("siblings", []):
+                            total_size_bytes += sibling.get("size", 0)
+                        
+                        if total_size_bytes > 0:
+                            standalone_cost = total_size_bytes / (1024 * 1024)  # Convert to MB
+        except Exception as e:
+            print(f"Cost calculation warning: {e}")
+            # Use default
+    
+    # For dependency mode, include dependencies cost (simplified: 2x for now)
+    result = {
+        id: {"total_cost": float(round(standalone_cost, 2))}
     }
+    
+    if dependency:
+        result[id]["standalone_cost"] = float(round(standalone_cost, 2))
+        result[id]["total_cost"] = float(round(standalone_cost * 2.0, 2))  # Assume dependencies add 100%
+    
+    return result
 
 @app.get("/artifact/model/{id}/lineage")
 def get_model_lineage(
@@ -898,14 +986,59 @@ def get_model_lineage(
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
-    # Return empty lineage graph for now
+    # Extract lineage by fetching config.json from HuggingFace if available
+    nodes = [{
+        "artifact_id": id,
+        "name": artifact["name"],
+        "source": "config_json"
+    }]
+    edges = []
+    
+    # Try to extract base_model or parent models from config
+    if artifact.get("url") and "huggingface.co" in artifact["url"]:
+        try:
+            import requests
+            import json
+            
+            # Try to fetch config.json from the model URL
+            config_url = artifact["url"].rstrip('/') + "/resolve/main/config.json"
+            response = requests.get(config_url, timeout=5)
+            
+            if response.status_code == 200:
+                config = response.json()
+                
+                # Look for base_model field
+                base_model = config.get("_name_or_path") or config.get("base_model")
+                
+                if base_model and base_model != artifact["name"]:
+                    # Check if base model exists in our registry
+                    base_model_id = None
+                    for aid, art in _list_artifacts():
+                        if art.get("name") == base_model or base_model in art.get("url", ""):
+                            base_model_id = aid
+                            break
+                    
+                    if base_model_id:
+                        # Add node for base model
+                        nodes.append({
+                            "artifact_id": base_model_id,
+                            "name": base_model,
+                            "source": "config_json"
+                        })
+                        
+                        # Add edge from base to current
+                        edges.append({
+                            "from_node_artifact_id": base_model_id,
+                            "to_node_artifact_id": id,
+                            "relationship": "base_model"
+                        })
+        except Exception as e:
+            print(f"Lineage extraction failed: {e}")
+            # Continue with minimal graph
+    
     return {
-        "nodes": [{
-            "artifact_id": id,
-            "name": artifact["name"],
-            "source": "config_json"
-        }],
-        "edges": []
+        "nodes": nodes,
+        "edges": edges
     }
 
 @app.post("/artifact/model/{id}/license-check")
