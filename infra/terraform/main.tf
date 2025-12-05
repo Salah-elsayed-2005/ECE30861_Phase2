@@ -136,8 +136,9 @@ resource "aws_lambda_function" "api" {
 
   environment {
     variables = {
-      S3_BUCKET      = aws_s3_bucket.models.bucket
-      DYNAMODB_TABLE = aws_dynamodb_table.registry.name
+      S3_BUCKET         = aws_s3_bucket.models.bucket
+      DYNAMODB_TABLE    = aws_dynamodb_table.registry.name
+      API_GATEWAY_URL   = aws_apigatewayv2_api.http_api.api_endpoint
     }
   }
 
