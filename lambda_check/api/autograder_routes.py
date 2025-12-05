@@ -117,9 +117,9 @@ _users_store: Dict[str, Dict[str, str]] = {}
 
 SESSION_TTL_SECONDS = 3600
 
-# Seed default admin
+# Seed default admin - EXACT password from OpenAPI spec line 560
 _DEFAULT_ADMIN_USERNAME = 'ece30861defaultadminuser'
-_DEFAULT_ADMIN_PASSWORD = "correcthorsebatterystaple123(!)"
+_DEFAULT_ADMIN_PASSWORD = 'correcthorsebatterystaple123(!__+@**(A\'"`;DROP TABLE packages;'
 
 def _hash_password(password: str, salt: str) -> str:
     return hashlib.sha256((salt + password).encode('utf-8')).hexdigest()
@@ -196,6 +196,29 @@ def _validate_token(token: Optional[str]) -> Optional[str]:
 def _generate_artifact_id() -> str:
     """Generate unique artifact ID"""
     return str(abs(hash(uuid.uuid4().hex + str(time.time()))))[:12]
+
+def _extract_artifact_name(url: str) -> str:
+    """Extract artifact name from URL - returns just the repo/model name"""
+    # Remove trailing slash and .git suffix
+    url = url.rstrip('/').replace('.git', '')
+    
+    # Split URL into parts
+    parts = url.split('/')
+    
+    # Handle URLs with /tree/ or /blob/ (GitHub branches)
+    # e.g., github.com/owner/repo/tree/branch -> use 'repo'
+    if 'tree' in parts or 'blob' in parts:
+        tree_idx = parts.index('tree') if 'tree' in parts else parts.index('blob')
+        if tree_idx >= 2:
+            return parts[tree_idx - 1]
+    
+    # Default: use last meaningful part
+    # github.com/owner/repo -> 'repo'
+    # huggingface.co/owner/model -> 'model'
+    if len(parts) >= 2:
+        return parts[-1]
+    
+    return "unknown"
 
 def _store_artifact(artifact_id: str, artifact_data: Dict[str, Any]):
     """Store artifact in DynamoDB or memory"""
@@ -378,14 +401,19 @@ def list_artifacts_query(
     # Get all artifacts
     all_artifacts = _list_artifacts()
     
-    # Handle wildcard query
+    # Handle wildcard query - return ALL results without pagination
     if len(queries) == 1 and queries[0].name == "*":
+        query = queries[0]
         for artifact_id, artifact in all_artifacts:
-            results.append({
-                "name": artifact["name"],
-                "id": artifact_id,
-                "type": artifact["type"]
-            })
+            # Apply type filter if specified
+            if query.types is None or artifact["type"] in query.types:
+                results.append({
+                    "name": artifact["name"],
+                    "id": artifact_id,
+                    "type": artifact["type"]
+                })
+        # For wildcard, return everything without pagination
+        return JSONResponse(status_code=200, content=results)
     else:
         # Handle specific queries
         for query in queries:
@@ -398,7 +426,7 @@ def list_artifacts_query(
                             "type": artifact["type"]
                         })
     
-    # Apply offset for pagination
+    # Apply offset for pagination (only for non-wildcard queries)
     start_idx = int(offset) if offset else 0
     page_size = 10
     paginated = results[start_idx:start_idx + page_size]
@@ -429,9 +457,8 @@ def create_artifact(
     if not artifact_data.url:
         raise HTTPException(status_code=400, detail="Missing url in artifact_data.")
     
-    # Extract name from URL
-    parts = artifact_data.url.rstrip('/').split('/')
-    name = parts[-1] if parts else "unknown"
+    # Extract name from URL using improved extraction
+    name = _extract_artifact_name(artifact_data.url)
     
     # Generate ID
     artifact_id = _generate_artifact_id()
@@ -750,13 +777,6 @@ def authenticate(auth_request: AuthenticationRequest = Body(...)):
     """Authenticate user (NON-BASELINE)"""
     username = auth_request.user.name
     password = auth_request.secret.password
-    
-    # Ensure default admin exists (idempotent)
-    if username == _DEFAULT_ADMIN_USERNAME:
-        try:
-            _create_user(_DEFAULT_ADMIN_USERNAME, _DEFAULT_ADMIN_PASSWORD, is_admin=True)
-        except:
-            pass
     
     # Validate user
     user = _get_user(username)

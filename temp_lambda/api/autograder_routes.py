@@ -120,9 +120,9 @@ _users_store: Dict[str, Dict[str, str]] = {}
 
 SESSION_TTL_SECONDS = 3600
 
-# Seed default admin
+# Seed default admin - EXACT password from OpenAPI spec line 560
 _DEFAULT_ADMIN_USERNAME = 'ece30861defaultadminuser'
-_DEFAULT_ADMIN_PASSWORD = "correcthorsebatterystaple123(!)"
+_DEFAULT_ADMIN_PASSWORD = 'correcthorsebatterystaple123(!__+@**(A\'"`;DROP TABLE artifacts;'
 
 def _hash_password(password: str, salt: str) -> str:
     return hashlib.sha256((salt + password).encode('utf-8')).hexdigest()
@@ -432,9 +432,8 @@ def create_artifact(
     if not artifact_data.url:
         raise HTTPException(status_code=400, detail="Missing url in artifact_data.")
     
-    # Extract name from URL
-    parts = artifact_data.url.rstrip('/').split('/')
-    name = parts[-1] if parts else "unknown"
+    # Extract name from URL using improved extraction
+    name = _extract_artifact_name(artifact_data.url)
     
     # Generate ID
     artifact_id = _generate_artifact_id()

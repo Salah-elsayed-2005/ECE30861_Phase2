@@ -8,11 +8,11 @@ from collections import deque
 from typing import Any, Deque, List, Optional
 
 import requests
-from dotenv import load_dotenv
+# from dotenv import load_dotenv  # Not needed in Lambda, uses env vars directly
 
 from src.logging_utils import get_logger
 
-load_dotenv()  # Load keys from .env file
+# load_dotenv()  # Not needed in Lambda
 
 
 logger = get_logger(__name__)
@@ -131,10 +131,11 @@ class PurdueClient(Client):
         if token is None:
             env_token = os.getenv("GEN_AI_STUDIO_API_KEY")
             if not env_token:
-                raise ValueError(
-                    "Missing token: set GEN_AI_STUDIO_API_KEY or pass token"
-                )
-            self.token = env_token
+                # Don't raise error - allow client to work without token (degraded mode)
+                logger.warning("GEN_AI_STUDIO_API_KEY not set - PurdueClient will operate in degraded mode")
+                self.token = None
+            else:
+                self.token = env_token
         else:
             self.token = token
         self.base_url = base_url
@@ -205,6 +206,9 @@ class PurdueClient(Client):
         --------
         >>> client.request("GET", "/models", params={"limit": 5})
         """
+        if self.token is None:
+            raise RuntimeError("PurdueClient cannot make requests without API token")
+        
         url = f"{self.base_url}{path}"
         headers = {"Authorization": f"Bearer {self.token}",
                    "Content-Type": "application/json"}
