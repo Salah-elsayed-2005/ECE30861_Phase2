@@ -442,7 +442,6 @@ def create_artifact(
     if not artifact_data.url:
         raise HTTPException(status_code=400, detail="Missing url in artifact_data.")
     
-<<<<<<< HEAD
     # Extract name from HuggingFace URL
     # Format: https://huggingface.co/{org}/{repo}[/tree/main]
     # or https://huggingface.co/datasets/{org}/{repo}
@@ -471,13 +470,6 @@ def create_artifact(
         name = relevant_parts[-1] if relevant_parts else "unknown"
     else:
         # Generic URL: use last part
-=======
-    # Use provided name or extract from URL
-    if artifact_data.name:
-        name = artifact_data.name
-    else:
-        parts = artifact_data.url.rstrip('/').split('/')
->>>>>>> 0a9f22c7276af1538d475797010ef6516cad7bbb
         name = parts[-1] if parts else "unknown"
     
     # Generate ID
@@ -694,13 +686,10 @@ def delete_artifact(
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
-<<<<<<< HEAD
     # Validate type matches (case-insensitive)
     if artifact["type"].lower() != artifact_type.lower():
         raise HTTPException(status_code=400, detail="Artifact type mismatch.")
     
-=======
->>>>>>> 0a9f22c7276af1538d475797010ef6516cad7bbb
     _delete_artifact(id)
     
     return JSONResponse(status_code=200, content={})
@@ -722,13 +711,9 @@ def get_artifact_by_name(
     
     results = []
     for artifact_id, artifact in _list_artifacts():
-<<<<<<< HEAD
         artifact_name = artifact.get("name", "")
         # Match both encoded and decoded versions
         if artifact_name == name or artifact_name == decoded_name:
-=======
-        if artifact["name"] == name:
->>>>>>> 0a9f22c7276af1538d475797010ef6516cad7bbb
             results.append({
                 "name": artifact_name,
                 "id": artifact_id,
@@ -753,22 +738,15 @@ def get_artifact_by_regex(
         raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
     
     try:
-<<<<<<< HEAD
         # Compile regex pattern - match anywhere in the string
         pattern = re.compile(regex_query.regex, re.IGNORECASE)
     except re.error as e:
         raise HTTPException(status_code=400, detail=f"Invalid regex pattern: {str(e)}")
-=======
-        pattern = re.compile(regex_query.regex, re.IGNORECASE)
-    except re.error:
-        raise HTTPException(status_code=400, detail="Invalid regex pattern.")
->>>>>>> 0a9f22c7276af1538d475797010ef6516cad7bbb
     
     results = []
     seen_ids = set()  # Avoid duplicates
     
     for artifact_id, artifact in _list_artifacts():
-<<<<<<< HEAD
         if artifact_id in seen_ids:
             continue
             
@@ -778,11 +756,6 @@ def get_artifact_by_regex(
         
         # Search in name, README, and URL
         if pattern.search(artifact_name) or pattern.search(artifact_readme) or pattern.search(artifact_url):
-=======
-        # Search in name, readme, and description
-        search_text = f"{artifact['name']} {artifact.get('readme', '')} {artifact.get('description', '')}"
-        if pattern.search(search_text):
->>>>>>> 0a9f22c7276af1538d475797010ef6516cad7bbb
             results.append({
                 "name": artifact_name,
                 "id": artifact_id,
@@ -794,14 +767,7 @@ def get_artifact_by_regex(
     if not results:
         raise HTTPException(status_code=404, detail="No artifact found under this regex.")
     
-<<<<<<< HEAD
     return JSONResponse(status_code=200, content=results)
-=======
-    if not results:
-        raise HTTPException(status_code=404, detail="No artifact found under this regex.")
-    
-    return results
->>>>>>> 0a9f22c7276af1538d475797010ef6516cad7bbb
 
 @app.get("/artifact/model/{id}/rate")
 def rate_model(
@@ -880,7 +846,6 @@ def get_artifact_cost(
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
-<<<<<<< HEAD
     # Calculate standalone cost
     # Try to get actual size from HuggingFace API or use estimated size
     standalone_cost = 100.0  # Default 100 MB
@@ -923,64 +888,6 @@ def get_artifact_cost(
         result[id]["total_cost"] = float(round(standalone_cost * 2.0, 2))  # Assume dependencies add 100%
     
     return result
-=======
-    # Calculate cost
-    total_cost = 0.0
-    
-    # 1. Check S3 if we have it stored
-    if AWS_AVAILABLE and "s3_key" in artifact:
-        try:
-            response = s3.head_object(Bucket=BUCKET_NAME, Key=artifact["s3_key"])
-            size_bytes = response['ContentLength']
-            total_cost = size_bytes / (1024 * 1024) # MB
-        except Exception as e:
-            print(f"S3 size check failed: {e}")
-            
-    # 2. If not in S3 (or failed), try to get size from HF if it's a model/dataset
-    if total_cost == 0.0 and "url" in artifact:
-        try:
-            if "huggingface.co" in artifact["url"]:
-                hf_client = HFClient(max_requests=10)
-                # Extract repo ID
-                parts = artifact["url"].rstrip('/').split('/')
-                if len(parts) >= 2:
-                    repo_id = f"{parts[-2]}/{parts[-1]}"
-                    # Get model info to find size (siblings)
-                    # This is an approximation using the API
-                    model_info = hf_client.request("GET", f"/api/models/{repo_id}")
-                    if "siblings" in model_info:
-                        size_bytes = 0
-                        for sibling in model_info["siblings"]:
-                            # Sum up size of all files (naive) or just main model files
-                            # HF API doesn't always return size in siblings list, might need tree
-                            pass
-                        
-                    # Better: use tree API
-                    tree = hf_client.request("GET", f"/api/models/{repo_id}/tree/main")
-                    if isinstance(tree, list):
-                        size_bytes = sum(item.get("size", 0) for item in tree)
-                        total_cost = size_bytes / (1024 * 1024)
-        except Exception as e:
-            print(f"HF size check failed: {e}")
-            
-    # Fallback mock if still 0
-    if total_cost == 0.0:
-        total_cost = 412.5
-
-    if dependency:
-        return {
-            id: {
-                "standalone_cost": total_cost,
-                "total_cost": total_cost # TODO: Add dependency cost if lineage implemented
-            }
-        }
-    else:
-        return {
-            id: {
-                "total_cost": total_cost
-            }
-        }
->>>>>>> 0a9f22c7276af1538d475797010ef6516cad7bbb
 
 @app.get("/artifact/model/{id}/lineage")
 def get_model_lineage(
@@ -996,18 +903,13 @@ def get_model_lineage(
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
-<<<<<<< HEAD
     # Extract lineage by fetching config.json from HuggingFace if available
-=======
-    # Return lineage graph
->>>>>>> 0a9f22c7276af1538d475797010ef6516cad7bbb
     nodes = [{
         "artifact_id": id,
         "name": artifact["name"],
         "source": "config_json"
     }]
     edges = []
-<<<<<<< HEAD
     
     # Try to extract base_model or parent models from config
     if artifact.get("url") and "huggingface.co" in artifact["url"]:
@@ -1051,46 +953,6 @@ def get_model_lineage(
             print(f"Lineage extraction failed: {e}")
             # Continue with minimal graph
     
-=======
-
-    # Try to fetch config.json from HuggingFace if it's a model
-    if artifact["type"] == "model" and "url" in artifact:
-        try:
-            hf_client = HFClient(max_requests=10)
-            # Extract model ID from URL
-            # URL format: https://huggingface.co/org/model_name
-            parts = artifact["url"].rstrip('/').split('/')
-            if len(parts) >= 2:
-                hf_repo_id = f"{parts[-2]}/{parts[-1]}"
-                
-                try:
-                    config_content = hf_client.request("GET", f"/api/models/{hf_repo_id}/config")
-                    # If config exists, check for base model
-                    if isinstance(config_content, dict):
-                        # Common keys for base models in HF config
-                        base_model_id = config_content.get("_name_or_path") or \
-                                      config_content.get("base_model_name_or_path")
-                        
-                        if base_model_id and base_model_id != hf_repo_id:
-                            # Create a node for the base model
-                            base_node_id = str(abs(hash(base_model_id)))[:12]
-                            nodes.append({
-                                "artifact_id": base_node_id,
-                                "name": base_model_id,
-                                "source": "config_json"
-                            })
-                            edges.append({
-                                "from_node_artifact_id": base_node_id,
-                                "to_node_artifact_id": id,
-                                "relationship": "base_model"
-                            })
-                except Exception as e:
-                    print(f"Failed to fetch config for lineage: {e}")
-                    
-        except Exception as e:
-            print(f"Lineage extraction error: {e}")
-
->>>>>>> 0a9f22c7276af1538d475797010ef6516cad7bbb
     return {
         "nodes": nodes,
         "edges": edges
