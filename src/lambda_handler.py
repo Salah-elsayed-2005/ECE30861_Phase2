@@ -1,6 +1,7 @@
 from mangum import Mangum
 from api.autograder_routes import app
 
+
 _mangum = Mangum(app)
 
 def _method(event: dict) -> str:
