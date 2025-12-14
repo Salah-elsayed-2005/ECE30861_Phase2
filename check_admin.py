@@ -1,6 +1,7 @@
 import boto3
 import hashlib
 
+
 table = boto3.resource('dynamodb', region_name='us-east-1').Table('tmr-dev-registry')
 resp = table.get_item(Key={'model_id': 'USER#ece30861defaultadminuser'})
 item = resp['Item']
