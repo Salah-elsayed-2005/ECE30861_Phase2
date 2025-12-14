@@ -571,7 +571,7 @@ def get_artifact_by_regex(
         raise HTTPException(status_code=400, detail="Missing regex pattern")
     
     try:
-        pattern = re.compile(regex_pattern)
+        pattern = re.compile(regex_pattern, re.IGNORECASE)
     except re.error as e:
         raise HTTPException(status_code=400, detail=f"Invalid regex pattern: {str(e)}")
     
