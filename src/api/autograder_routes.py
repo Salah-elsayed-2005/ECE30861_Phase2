@@ -135,7 +135,8 @@ class ModelRating(BaseModel):
 _artifacts_store: Dict[str, Dict[str, Any]] = {}
 _users_store: Dict[str, Dict[str, str]] = {}
 
-SESSION_TTL_SECONDS = 3600
+SESSION_TTL_SECONDS = 36000  # 10 hours as per requirements
+MAX_TOKEN_INTERACTIONS = 1000  # Token valid for 1000 API interactions
 
 # Seed default admin
 _DEFAULT_ADMIN_USERNAME = 'ece30861defaultadminuser'
@@ -349,6 +350,91 @@ def _clear_all_users():
     
     _users_store.clear()
 
+# ==================== Audit Storage ====================
+_audit_store: Dict[str, List[Dict[str, Any]]] = {}
+
+def _add_audit_entry(artifact_id: str, username: str, action: str, artifact_name: str = "", artifact_type: str = "model"):
+    """Add an audit entry for an artifact action"""
+    entry = {
+        "user": {"name": username},
+        "date": datetime.utcnow().isoformat() + "Z",
+        "artifact": {
+            "name": artifact_name,
+            "id": artifact_id,
+            "type": artifact_type
+        },
+        "action": action
+    }
+    if artifact_id not in _audit_store:
+        _audit_store[artifact_id] = []
+    _audit_store[artifact_id].append(entry)
+    
+    # Also store in DynamoDB if available
+    if AWS_AVAILABLE:
+        try:
+            audit_id = f"AUDIT#{artifact_id}#{uuid.uuid4().hex[:8]}"
+            table.put_item(Item={
+                'model_id': audit_id,
+                'artifact_id': artifact_id,
+                'username': username,
+                'action': action,
+                'artifact_name': artifact_name,
+                'artifact_type': artifact_type,
+                'timestamp': entry['date']
+            })
+        except Exception as e:
+            print(f"Audit storage warning: {e}")
+
+def _get_audit_entries(artifact_id: str) -> List[Dict[str, Any]]:
+    """Get all audit entries for an artifact"""
+    entries = []
+    
+    # Try DynamoDB first
+    if AWS_AVAILABLE:
+        try:
+            response = table.scan(
+                FilterExpression='begins_with(model_id, :prefix) AND artifact_id = :aid',
+                ExpressionAttributeValues={
+                    ':prefix': 'AUDIT#',
+                    ':aid': artifact_id
+                }
+            )
+            for item in response.get('Items', []):
+                entries.append({
+                    "user": {"name": item.get('username', 'unknown')},
+                    "date": item.get('timestamp', ''),
+                    "artifact": {
+                        "name": item.get('artifact_name', ''),
+                        "id": artifact_id,
+                        "type": item.get('artifact_type', 'model')
+                    },
+                    "action": item.get('action', 'UNKNOWN')
+                })
+        except Exception as e:
+            print(f"Audit retrieval warning: {e}")
+    
+    # Fallback to memory
+    if not entries:
+        entries = _audit_store.get(artifact_id, [])
+    
+    return entries
+
+def _clear_all_audits():
+    """Clear all audit entries"""
+    global _audit_store
+    _audit_store = {}
+    
+    if AWS_AVAILABLE:
+        try:
+            response = table.scan(
+                FilterExpression='begins_with(model_id, :prefix)',
+                ExpressionAttributeValues={':prefix': 'AUDIT#'}
+            )
+            for item in response.get('Items', []):
+                table.delete_item(Key={'model_id': item['model_id']})
+        except Exception as e:
+            print(f"Audit clear warning: {e}")
+
 # Seed admin user
 try:
     _create_user(_DEFAULT_ADMIN_USERNAME, _DEFAULT_ADMIN_PASSWORD, is_admin=True)
@@ -383,9 +469,10 @@ def reset_registry(x_authorization: Optional[str] = Header(None, alias="X-Author
     if not user or not user.get("is_admin"):
         raise HTTPException(status_code=401, detail="You do not have permission to reset the registry.")
     
-    # Clear all artifacts and users
+    # Clear all artifacts, users, and audits
     _clear_all_artifacts()
     _clear_all_users()
+    _clear_all_audits()
     
     # Re-seed admin
     try:
@@ -727,6 +814,9 @@ def create_artifact(
     }
     _store_artifact(artifact_id, artifact)
     
+    # Log audit entry for CREATE action
+    _add_audit_entry(artifact_id, username, "CREATE", name, artifact_type)
+    
     # Build response
     download_url = f"https://example.com/download/{artifact_id}"
     
@@ -800,6 +890,9 @@ def update_artifact(
     stored["updated_by"] = username
     _store_artifact(id, stored)
     
+    # Log audit entry for UPDATE action
+    _add_audit_entry(id, username, "UPDATE", stored.get("name", ""), stored.get("type", artifact_type))
+    
     return JSONResponse(status_code=200, content={"message": "Artifact is updated."})
 
 @app.delete("/artifacts/{artifact_type}/{id}")
@@ -824,6 +917,9 @@ def delete_artifact(
     # Validate type matches (case-insensitive)
     if artifact["type"].lower() != artifact_type.lower():
         raise HTTPException(status_code=400, detail="Artifact type mismatch.")
+    
+    # Log audit entry BEFORE delete (to capture artifact info)
+    _add_audit_entry(id, username, "DELETE", artifact.get("name", ""), artifact.get("type", artifact_type))
     
     _delete_artifact(id)
     
@@ -1216,6 +1312,96 @@ def check_license(
     compatible = True
     
     return JSONResponse(status_code=200, content=compatible)
+
+@app.get("/artifact/{artifact_type}/{id}/audit")
+def get_artifact_audit(
+    artifact_type: str,
+    id: str,
+    x_authorization: Optional[str] = Header(None, alias="X-Authorization")
+):
+    """Get audit trail for an artifact (NON-BASELINE)
+    
+    Returns historical information about what changed, when, and by whom.
+    """
+    username = _validate_token(x_authorization)
+    if not username:
+        raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
+    
+    # Validate artifact_type
+    if artifact_type.lower() not in ["model", "dataset", "code"]:
+        raise HTTPException(status_code=400, detail="Invalid artifact_type.")
+    
+    artifact = _get_artifact(id)
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Artifact does not exist.")
+    
+    # Get audit entries
+    entries = _get_audit_entries(id)
+    
+    # Add an AUDIT action for this request
+    _add_audit_entry(id, username, "AUDIT", artifact.get("name", ""), artifact.get("type", artifact_type))
+    
+    return JSONResponse(status_code=200, content=entries)
+
+@app.get("/artifact/malicious")
+def get_malicious_artifacts(
+    x_authorization: Optional[str] = Header(None, alias="X-Authorization")
+):
+    """Get list of potentially malicious models (NON-BASELINE)
+    
+    Returns models suspected to be malicious based on various heuristics:
+    - Low net_score (< 0.3)
+    - Missing or suspicious license
+    - Failed metrics
+    - Unusual patterns in code/data
+    """
+    username = _validate_token(x_authorization)
+    if not username:
+        raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
+    
+    suspicious_artifacts = []
+    
+    for artifact_id, artifact in _list_artifacts():
+        is_suspicious = False
+        reasons = []
+        
+        # Check for low net_score
+        net_score = artifact.get("net_score", 1.0)
+        if net_score < 0.3:
+            is_suspicious = True
+            reasons.append(f"Low net_score: {net_score:.2f}")
+        
+        # Check for missing/problematic license
+        scores = artifact.get("scores", {})
+        license_score = scores.get("license", 1.0)
+        if license_score < 0.5:
+            is_suspicious = True
+            reasons.append(f"Suspicious license score: {license_score:.2f}")
+        
+        # Check for failed reproducibility
+        reproducibility = scores.get("reproducibility", 1.0)
+        if reproducibility < 0.3:
+            is_suspicious = True
+            reasons.append(f"Low reproducibility: {reproducibility:.2f}")
+        
+        # Check for suspicious URL patterns
+        url = artifact.get("url", "").lower()
+        suspicious_patterns = ["malware", "hack", "exploit", "crack", "keygen"]
+        for pattern in suspicious_patterns:
+            if pattern in url:
+                is_suspicious = True
+                reasons.append(f"Suspicious URL pattern: {pattern}")
+                break
+        
+        if is_suspicious:
+            suspicious_artifacts.append({
+                "name": artifact.get("name", ""),
+                "id": artifact_id,
+                "type": artifact.get("type", "model"),
+                "reasons": reasons
+            })
+    
+    return JSONResponse(status_code=200, content=suspicious_artifacts)
 
 @app.put("/authenticate")
 def authenticate(auth_request: AuthenticationRequest = Body(...)):
