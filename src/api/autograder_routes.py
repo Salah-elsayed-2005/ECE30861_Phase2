@@ -585,13 +585,17 @@ def get_artifact_by_regex(
         artifact_name = artifact.get("name", "")
         artifact_readme = artifact.get("readme", "")
         
-        # Search ONLY in name and readme per OpenAPI spec:
+        # Search in name and readme per OpenAPI spec:
         # "A regular expression over artifact names and READMEs"
         if pattern.search(artifact_name) or pattern.search(artifact_readme):
+            # Ensure type is lowercase per ArtifactType enum in spec
+            artifact_type = artifact.get("type", "model")
+            if isinstance(artifact_type, str):
+                artifact_type = artifact_type.lower()
             results.append({
                 "name": artifact_name,
-                "id": artifact_id,
-                "type": artifact["type"]
+                "id": str(artifact_id),  # Ensure ID is string
+                "type": artifact_type
             })
             seen_ids.add(artifact_id)
     
