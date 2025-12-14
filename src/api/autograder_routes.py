@@ -3,9 +3,8 @@ Autograder-compatible routes for Phase 2.
 These endpoints match the OpenAPI specification exactly.
 """
 
-from fastapi import FastAPI, HTTPException, Header, Query, Body, Request
+from fastapi import FastAPI, HTTPException, Header, Query, Body
 from fastapi.responses import JSONResponse, PlainTextResponse
-from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 from pydantic import BaseModel, Field, ConfigDict
@@ -34,26 +33,6 @@ app = FastAPI(
     version="3.4.4",
     description="API for ECE 461/Fall 2025/Project Phase 2: A Trustworthy Model Registry"
 )
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.options("/{full_path:path}")
-async def options_handler(full_path: str, request: Request):
-    return JSONResponse(
-        status_code=200,
-        content="OK",
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-        },
-    )
 
 # ==================== AWS Setup ====================
 try:
