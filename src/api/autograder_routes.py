@@ -70,18 +70,19 @@ class ArtifactQuery(BaseModel):
     types: Optional[List[str]] = None
 
 class ArtifactRegEx(BaseModel):
-    """Regex search request - accepts both 'regex' and 'RegEx' field names"""
+    """Regex search request - OpenAPI spec uses lowercase 'regex' as required field"""
     model_config = ConfigDict(populate_by_name=True, extra='allow')
-    regex: Optional[str] = Field(default=None, alias="RegEx")
+    # OpenAPI spec: field is 'regex' (lowercase, required)
+    regex: Optional[str] = Field(default=None)
     
-    def get_regex_pattern(self) -> str:
-        """Get regex pattern from either field name"""
-        # Check for 'regex' first (spec field name), then 'RegEx' (alias)
+    def get_regex_pattern(self) -> Optional[str]:
+        """Get regex pattern from request body - handles various field names"""
+        # Primary: Check the 'regex' field (per OpenAPI spec)
         if self.regex:
             return self.regex
-        # Check extra fields for different casings
+        # Fallback: Check extra fields for 'RegEx' (different casing)
         extra_data = getattr(self, '__pydantic_extra__', {}) or {}
-        return extra_data.get('regex', '') or extra_data.get('RegEx', '') or ''
+        return extra_data.get('RegEx', None) or extra_data.get('Regex', None)
 
 class User(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -582,12 +583,15 @@ def get_artifact_by_regex(
         if artifact_id in seen_ids:
             continue
             
-        artifact_name = artifact.get("name", "")
-        artifact_readme = artifact.get("readme", "")
+        artifact_name = artifact.get("name", "") or ""
+        artifact_readme = artifact.get("readme", "") or ""
         
         # Search in name and readme per OpenAPI spec:
         # "A regular expression over artifact names and READMEs"
-        if pattern.search(artifact_name) or pattern.search(artifact_readme):
+        name_match = pattern.search(artifact_name) if artifact_name else None
+        readme_match = pattern.search(artifact_readme) if artifact_readme else None
+        
+        if name_match or readme_match:
             # Ensure type is lowercase per ArtifactType enum in spec
             artifact_type = artifact.get("type", "model")
             if isinstance(artifact_type, str):
