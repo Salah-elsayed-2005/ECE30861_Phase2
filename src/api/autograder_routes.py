@@ -568,12 +568,12 @@ def get_artifact_by_regex(
     # Get regex pattern - handles both 'regex' and 'RegEx' field names
     regex_pattern = regex_query.get_regex_pattern()
     if not regex_pattern:
-        raise HTTPException(status_code=400, detail="Missing regex pattern")
+        raise HTTPException(status_code=400, detail="There is missing field(s) in the artifact_regex or it is formed improperly, or is invalid")
     
     try:
         pattern = re.compile(regex_pattern, re.IGNORECASE)
     except re.error as e:
-        raise HTTPException(status_code=400, detail=f"Invalid regex pattern: {str(e)}")
+        raise HTTPException(status_code=400, detail="There is missing field(s) in the artifact_regex or it is formed improperly, or is invalid")
     
     results = []
     seen_ids = set()
@@ -584,14 +584,10 @@ def get_artifact_by_regex(
             
         artifact_name = artifact.get("name", "")
         artifact_readme = artifact.get("readme", "")
-        artifact_description = artifact.get("description", "")
         
-        # Search in name, readme, and description per OpenAPI spec:
+        # Search in name and readme per OpenAPI spec:
         # "A regular expression over artifact names and READMEs"
-        # Description is included as it's often part of README/model card content
-        if (pattern.search(artifact_name) or 
-            pattern.search(artifact_readme) or 
-            pattern.search(artifact_description)):
+        if pattern.search(artifact_name) or pattern.search(artifact_readme):
             # Ensure type is lowercase per ArtifactType enum in spec
             artifact_type = artifact.get("type", "model")
             if isinstance(artifact_type, str):
