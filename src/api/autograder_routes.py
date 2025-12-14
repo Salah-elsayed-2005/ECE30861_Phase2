@@ -1,7 +1,7 @@
 """
 Autograder-compatible routes for Phase 2.
-These endpoints match the OpenAPI specification exactly.
 """
+
 
 from fastapi import FastAPI, HTTPException, Header, Query, Body
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -571,7 +571,7 @@ def get_artifact_by_regex(
         raise HTTPException(status_code=400, detail="Missing regex pattern")
     
     try:
-        pattern = re.compile(regex_pattern, re.IGNORECASE)
+        pattern = re.compile(regex_pattern)
     except re.error as e:
         raise HTTPException(status_code=400, detail=f"Invalid regex pattern: {str(e)}")
     
@@ -584,17 +584,10 @@ def get_artifact_by_regex(
             
         artifact_name = artifact.get("name", "")
         artifact_readme = artifact.get("readme", "")
-        artifact_url = artifact.get("url", "")
-        artifact_description = artifact.get("description", "")
-        artifact_tags = artifact.get("tags", [])
-        tags_str = " ".join(artifact_tags) if isinstance(artifact_tags, list) else str(artifact_tags)
         
-        # Search in name, readme, url, description, and tags
-        if (pattern.search(artifact_name) or 
-            pattern.search(artifact_readme) or 
-            pattern.search(artifact_url) or
-            pattern.search(artifact_description) or
-            pattern.search(tags_str)):
+        # Search ONLY in name and readme per OpenAPI spec:
+        # "A regular expression over artifact names and READMEs"
+        if pattern.search(artifact_name) or pattern.search(artifact_readme):
             results.append({
                 "name": artifact_name,
                 "id": artifact_id,
