@@ -70,8 +70,18 @@ class ArtifactQuery(BaseModel):
     types: Optional[List[str]] = None
 
 class ArtifactRegEx(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-    regex: str = Field(alias="RegEx")
+    """Regex search request - accepts both 'regex' and 'RegEx' field names"""
+    model_config = ConfigDict(populate_by_name=True, extra='allow')
+    regex: Optional[str] = Field(default=None, alias="RegEx")
+    
+    def get_regex_pattern(self) -> str:
+        """Get regex pattern from either field name"""
+        # Check for 'regex' first (spec field name), then 'RegEx' (alias)
+        if self.regex:
+            return self.regex
+        # Check extra fields for different casings
+        extra_data = getattr(self, '__pydantic_extra__', {}) or {}
+        return extra_data.get('regex', '') or extra_data.get('RegEx', '') or ''
 
 class User(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -468,8 +478,13 @@ def get_artifact_by_regex(
     if not username:
         raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
     
+    # Get regex pattern - handles both 'regex' and 'RegEx' field names
+    regex_pattern = regex_query.get_regex_pattern()
+    if not regex_pattern:
+        raise HTTPException(status_code=400, detail="Missing regex pattern")
+    
     try:
-        pattern = re.compile(regex_query.regex, re.IGNORECASE)
+        pattern = re.compile(regex_pattern, re.IGNORECASE)
     except re.error as e:
         raise HTTPException(status_code=400, detail=f"Invalid regex pattern: {str(e)}")
     
@@ -483,8 +498,16 @@ def get_artifact_by_regex(
         artifact_name = artifact.get("name", "")
         artifact_readme = artifact.get("readme", "")
         artifact_url = artifact.get("url", "")
+        artifact_description = artifact.get("description", "")
+        artifact_tags = artifact.get("tags", [])
+        tags_str = " ".join(artifact_tags) if isinstance(artifact_tags, list) else str(artifact_tags)
         
-        if pattern.search(artifact_name) or pattern.search(artifact_readme) or pattern.search(artifact_url):
+        # Search in name, readme, url, description, and tags
+        if (pattern.search(artifact_name) or 
+            pattern.search(artifact_readme) or 
+            pattern.search(artifact_url) or
+            pattern.search(artifact_description) or
+            pattern.search(tags_str)):
             results.append({
                 "name": artifact_name,
                 "id": artifact_id,
@@ -497,20 +520,55 @@ def get_artifact_by_regex(
     
     return JSONResponse(status_code=200, content=results)
 
-def _fetch_readme_from_url(url: str) -> str:
-    """Fetch README content from HuggingFace or GitHub URL"""
-    readme_content = ""
+def _fetch_model_card_data(url: str) -> dict:
+    """Fetch README and other searchable content from HuggingFace or GitHub URL
+    
+    Returns dict with:
+    - readme: Full README content
+    - description: Model/dataset description
+    - tags: List of tags
+    """
+    result = {"readme": "", "description": "", "tags": []}
     try:
         import requests
         
         if "huggingface.co" in url.lower():
-            # Try to fetch README.md from HuggingFace
+            # Extract org/repo from URL
             base_url = url.rstrip('/').replace('/tree/main', '').replace('/tree/master', '')
+            url_parts = base_url.replace("https://", "").replace("http://", "").split("/")
+            
+            # Try to fetch model/dataset info from HuggingFace API
+            if len(url_parts) >= 3:
+                org = url_parts[1] if len(url_parts) > 1 else ""
+                repo = url_parts[2] if len(url_parts) > 2 else ""
+                
+                if org and repo:
+                    # Try models API first
+                    api_url = f"https://huggingface.co/api/models/{org}/{repo}"
+                    response = requests.get(api_url, timeout=5)
+                    
+                    if response.status_code != 200:
+                        # Try datasets API
+                        api_url = f"https://huggingface.co/api/datasets/{org}/{repo}"
+                        response = requests.get(api_url, timeout=5)
+                    
+                    if response.status_code == 200:
+                        info = response.json()
+                        # Get description from modelId or cardData
+                        result["description"] = info.get("description", "") or info.get("cardData", {}).get("description", "")
+                        # Get tags
+                        result["tags"] = info.get("tags", []) or info.get("pipeline_tag", [])
+                        if isinstance(result["tags"], str):
+                            result["tags"] = [result["tags"]]
+                        print(f"✓ Fetched HF API info: {len(result['tags'])} tags, desc={len(result['description'])} chars")
+            
+            # Fetch README.md
             readme_url = f"{base_url}/resolve/main/README.md"
             response = requests.get(readme_url, timeout=10)
             if response.status_code == 200:
-                readme_content = response.text[:10000]  # Limit to 10KB
-                print(f"✓ Fetched README from HuggingFace: {len(readme_content)} chars")
+                result["readme"] = response.text[:10000]  # Limit to 10KB
+                print(f"✓ Fetched README from HuggingFace: {len(result['readme'])} chars")
+                
         elif "github.com" in url.lower():
             # Try to fetch README.md from GitHub raw
             raw_url = url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/").replace("/tree/", "/")
@@ -522,12 +580,13 @@ def _fetch_readme_from_url(url: str) -> str:
                 readme_url = f"{raw_url}master/README.md"
                 response = requests.get(readme_url, timeout=10)
             if response.status_code == 200:
-                readme_content = response.text[:10000]
-                print(f"✓ Fetched README from GitHub: {len(readme_content)} chars")
+                result["readme"] = response.text[:10000]
+                print(f"✓ Fetched README from GitHub: {len(result['readme'])} chars")
+                
     except Exception as e:
-        print(f"README fetch warning: {e}")
+        print(f"Model card fetch warning: {e}")
     
-    return readme_content
+    return result
 
 @app.post("/artifact/{artifact_type}")
 def create_artifact(
@@ -570,8 +629,11 @@ def create_artifact(
         else:
             name = parts[-1] if parts else "unknown"
     
-    # Fetch README content for regex search
-    readme_content = _fetch_readme_from_url(artifact_data.url)
+    # Fetch README and other searchable content for regex search
+    model_card_data = _fetch_model_card_data(artifact_data.url)
+    readme_content = model_card_data.get("readme", "")
+    description = model_card_data.get("description", "")
+    tags = model_card_data.get("tags", [])
     
     # Generate ID
     artifact_id = _generate_artifact_id()
@@ -656,6 +718,8 @@ def create_artifact(
         "type": artifact_type,  # Store with original case from URL
         "url": artifact_data.url,
         "readme": readme_content,  # Store README for regex search
+        "description": description,  # Store description for regex search
+        "tags": tags,  # Store tags for regex search
         "scores": scores,
         "net_score": net_score,
         "created_at": datetime.utcnow().isoformat(),
