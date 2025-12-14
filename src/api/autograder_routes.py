@@ -497,6 +497,38 @@ def get_artifact_by_regex(
     
     return JSONResponse(status_code=200, content=results)
 
+def _fetch_readme_from_url(url: str) -> str:
+    """Fetch README content from HuggingFace or GitHub URL"""
+    readme_content = ""
+    try:
+        import requests
+        
+        if "huggingface.co" in url.lower():
+            # Try to fetch README.md from HuggingFace
+            base_url = url.rstrip('/').replace('/tree/main', '').replace('/tree/master', '')
+            readme_url = f"{base_url}/resolve/main/README.md"
+            response = requests.get(readme_url, timeout=10)
+            if response.status_code == 200:
+                readme_content = response.text[:10000]  # Limit to 10KB
+                print(f"✓ Fetched README from HuggingFace: {len(readme_content)} chars")
+        elif "github.com" in url.lower():
+            # Try to fetch README.md from GitHub raw
+            raw_url = url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/").replace("/tree/", "/")
+            if not raw_url.endswith("/"):
+                raw_url += "/"
+            readme_url = f"{raw_url}main/README.md"
+            response = requests.get(readme_url, timeout=10)
+            if response.status_code != 200:
+                readme_url = f"{raw_url}master/README.md"
+                response = requests.get(readme_url, timeout=10)
+            if response.status_code == 200:
+                readme_content = response.text[:10000]
+                print(f"✓ Fetched README from GitHub: {len(readme_content)} chars")
+    except Exception as e:
+        print(f"README fetch warning: {e}")
+    
+    return readme_content
+
 @app.post("/artifact/{artifact_type}")
 def create_artifact(
     artifact_type: str,
@@ -537,6 +569,9 @@ def create_artifact(
             name = relevant_parts[-1] if relevant_parts else "unknown"
         else:
             name = parts[-1] if parts else "unknown"
+    
+    # Fetch README content for regex search
+    readme_content = _fetch_readme_from_url(artifact_data.url)
     
     # Generate ID
     artifact_id = _generate_artifact_id()
@@ -620,6 +655,7 @@ def create_artifact(
         "name": name,
         "type": artifact_type,  # Store with original case from URL
         "url": artifact_data.url,
+        "readme": readme_content,  # Store README for regex search
         "scores": scores,
         "net_score": net_score,
         "created_at": datetime.utcnow().isoformat(),
@@ -966,12 +1002,38 @@ def get_artifact_cost(
     
     return result
 
+def _fetch_base_model_from_config(url: str) -> Optional[str]:
+    """Fetch base_model name from config.json"""
+    if not url or "huggingface.co" not in url.lower():
+        return None
+    try:
+        import requests
+        config_url = url.rstrip('/') + "/resolve/main/config.json"
+        response = requests.get(config_url, timeout=5)
+        if response.status_code == 200:
+            config = response.json()
+            # Look for various base model fields
+            base_model = (
+                config.get("_name_or_path") or 
+                config.get("base_model") or
+                config.get("model_name_or_path") or
+                config.get("pretrained_model_name_or_path")
+            )
+            return base_model
+    except Exception as e:
+        print(f"Config fetch warning: {e}")
+    return None
+
 @app.get("/artifact/model/{id}/lineage")
 def get_model_lineage(
     id: str,
     x_authorization: Optional[str] = Header(None, alias="X-Authorization")
 ):
-    """Get model lineage graph (BASELINE)"""
+    """Get model lineage graph (BASELINE)
+    
+    Builds a complete lineage graph by examining ALL models in the registry
+    to find parent-child relationships via config.json base_model fields.
+    """
     username = _validate_token(x_authorization)
     if not username:
         raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
@@ -980,59 +1042,90 @@ def get_model_lineage(
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact does not exist.")
     
-    # Extract lineage by fetching config.json from HuggingFace if available
-    nodes = [{
-        "artifact_id": id,
-        "name": artifact["name"],
-        "source": "config_json"
-    }]
-    edges = []
+    # Get ALL models in the registry
+    all_artifacts = _list_artifacts()
+    all_models = [(aid, art) for aid, art in all_artifacts if art.get("type", "").lower() == "model"]
     
-    # Try to extract base_model or parent models from config
-    if artifact.get("url") and "huggingface.co" in artifact["url"]:
-        try:
-            import requests
-            import json
+    # Build lookup maps
+    id_to_artifact = {aid: art for aid, art in all_models}
+    name_to_id = {}
+    url_to_id = {}
+    for aid, art in all_models:
+        name_to_id[art.get("name", "")] = aid
+        if art.get("url"):
+            url_to_id[art["url"]] = aid
+            # Also map partial URL patterns
+            url_parts = art["url"].split("/")
+            if len(url_parts) >= 2:
+                # Map org/model pattern
+                short_name = "/".join(url_parts[-2:]).rstrip('/')
+                name_to_id[short_name] = aid
+    
+    # Collect all nodes and edges
+    nodes_map = {}  # artifact_id -> node
+    edges_list = []
+    
+    # Process each model to find its base model
+    for aid, art in all_models:
+        base_model_name = _fetch_base_model_from_config(art.get("url"))
+        
+        if base_model_name:
+            # Try to find base model in registry
+            base_model_id = None
             
-            # Try to fetch config.json from the model URL
-            config_url = artifact["url"].rstrip('/') + "/resolve/main/config.json"
-            response = requests.get(config_url, timeout=5)
-            
-            if response.status_code == 200:
-                config = response.json()
-                
-                # Look for base_model field
-                base_model = config.get("_name_or_path") or config.get("base_model")
-                
-                if base_model and base_model != artifact["name"]:
-                    # Check if base model exists in our registry
-                    base_model_id = None
-                    for aid, art in _list_artifacts():
-                        if art.get("name") == base_model or base_model in art.get("url", ""):
-                            base_model_id = aid
-                            break
+            # Check by exact name match
+            if base_model_name in name_to_id:
+                base_model_id = name_to_id[base_model_name]
+            else:
+                # Check if base_model_name is contained in any artifact name/URL
+                for other_id, other_art in all_models:
+                    other_name = other_art.get("name", "")
+                    other_url = other_art.get("url", "")
                     
-                    if base_model_id:
-                        # Add node for base model
-                        nodes.append({
-                            "artifact_id": base_model_id,
-                            "name": base_model,
-                            "source": "config_json"
-                        })
-                        
-                        # Add edge from base to current
-                        edges.append({
-                            "from_node_artifact_id": base_model_id,
-                            "to_node_artifact_id": id,
-                            "relationship": "base_model"
-                        })
-        except Exception as e:
-            print(f"Lineage extraction failed: {e}")
-            # Continue with minimal graph
+                    if (base_model_name == other_name or
+                        base_model_name in other_url or
+                        other_name in base_model_name or
+                        (other_url and base_model_name in other_url)):
+                        base_model_id = other_id
+                        break
+            
+            if base_model_id and base_model_id != aid:
+                # Add both nodes
+                if base_model_id not in nodes_map:
+                    base_art = id_to_artifact.get(base_model_id, {})
+                    nodes_map[base_model_id] = {
+                        "artifact_id": base_model_id,
+                        "name": base_art.get("name", base_model_name),
+                        "source": "config_json"
+                    }
+                if aid not in nodes_map:
+                    nodes_map[aid] = {
+                        "artifact_id": aid,
+                        "name": art.get("name", ""),
+                        "source": "config_json"
+                    }
+                
+                # Add edge from parent to child
+                edge = {
+                    "from_node_artifact_id": base_model_id,
+                    "to_node_artifact_id": aid,
+                    "relationship": "base_model"
+                }
+                if edge not in edges_list:
+                    edges_list.append(edge)
     
+    # Ensure the requested artifact is always in nodes
+    if id not in nodes_map:
+        nodes_map[id] = {
+            "artifact_id": id,
+            "name": artifact["name"],
+            "source": "config_json"
+        }
+    
+    # Return all discovered nodes and edges
     return {
-        "nodes": nodes,
-        "edges": edges
+        "nodes": list(nodes_map.values()),
+        "edges": edges_list
     }
 
 @app.post("/artifact/model/{id}/license-check")
