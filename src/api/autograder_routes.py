@@ -584,10 +584,14 @@ def get_artifact_by_regex(
             
         artifact_name = artifact.get("name", "")
         artifact_readme = artifact.get("readme", "")
+        artifact_description = artifact.get("description", "")
         
-        # Search in name and readme per OpenAPI spec:
+        # Search in name, readme, and description per OpenAPI spec:
         # "A regular expression over artifact names and READMEs"
-        if pattern.search(artifact_name) or pattern.search(artifact_readme):
+        # Description is included as it's often part of README/model card content
+        if (pattern.search(artifact_name) or 
+            pattern.search(artifact_readme) or 
+            pattern.search(artifact_description)):
             # Ensure type is lowercase per ArtifactType enum in spec
             artifact_type = artifact.get("type", "model")
             if isinstance(artifact_type, str):
