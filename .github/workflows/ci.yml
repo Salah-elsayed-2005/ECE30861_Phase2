@@ -43,6 +43,7 @@ jobs:
 
       # Run Python tests with coverage
       - name: Run Python tests
+        id: pytest
         env:
           GEN_AI_STUDIO_API_KEY: ${{ secrets.GEN_AI_STUDIO_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -56,6 +57,7 @@ jobs:
 
       # Run Node.js tests
       - name: Run Node.js tests
+        id: jest
         run: npm test
         continue-on-error: true
 
@@ -67,3 +69,21 @@ jobs:
           flags: unittests
           name: codecov-umbrella
         continue-on-error: true
+
+      # CI Test Summary (non-blocking)
+      - name: CI Test Summary
+        if: always()
+        run: |
+          {
+            echo "## CI Test Summary"
+            echo ""
+            echo "- Pytest: **${{ steps.pytest.outcome }}**"
+            echo "- Jest: **${{ steps.jest.outcome }}**"
+            echo ""
+            if [ "${{ steps.pytest.outcome }}" != "success" ] || [ "${{ steps.jest.outcome }}" != "success" ]; then
+              echo "⚠️ One or more test steps failed, but failures are **non-blocking** in this pipeline."
+              echo "Check the logs above for details."
+            else
+              echo "✅ All test steps passed."
+            fi
+          } >> $GITHUB_STEP_SUMMARY
