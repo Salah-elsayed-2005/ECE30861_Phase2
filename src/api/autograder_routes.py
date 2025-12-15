@@ -587,13 +587,14 @@ async def get_artifact_by_regex(
     
     for artifact_id, artifact in all_artifacts:
         name = artifact.get("name", "")
+        artifact_type = artifact.get("type", "model").lower()
         
         # Check name match
         if name and pattern.search(name):
             results.append({
                 "name": name,
-                "id": artifact_id,
-                "type": artifact.get("type", "model").lower()
+                "id": str(artifact_id),
+                "type": artifact_type
             })
             continue
         
@@ -602,8 +603,8 @@ async def get_artifact_by_regex(
         if readme and pattern.search(readme):
             results.append({
                 "name": name,
-                "id": artifact_id,
-                "type": artifact.get("type", "model").lower()
+                "id": str(artifact_id),
+                "type": artifact_type
             })
             continue
         
@@ -614,8 +615,8 @@ async def get_artifact_by_regex(
             if readme and pattern.search(readme):
                 results.append({
                     "name": name,
-                    "id": artifact_id,
-                    "type": artifact.get("type", "model").lower()
+                    "id": str(artifact_id),
+                    "type": artifact_type
                 })
     
     if not results:
