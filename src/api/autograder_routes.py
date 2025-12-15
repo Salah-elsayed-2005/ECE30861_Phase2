@@ -3,7 +3,7 @@ Autograder-compatible routes for Phase 2.
 """
 
 
-from fastapi import FastAPI, HTTPException, Header, Query, Body
+from fastapi import FastAPI, HTTPException, Header, Query, Body, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
@@ -71,7 +71,8 @@ class ArtifactQuery(BaseModel):
 
 class ArtifactRegEx(BaseModel):
     """Regex search request - OpenAPI spec uses lowercase 'regex' as required field"""
-    regex: Optional[str] = None
+    model_config = ConfigDict(populate_by_name=True)
+    regex: Optional[str] = Field(None, alias="RegEx")
 
 class User(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -544,8 +545,8 @@ def list_artifacts_query(
     )
 
 @app.post("/artifact/byRegEx")
-def get_artifact_by_regex(
-    regex_query: ArtifactRegEx = Body(...),
+async def get_artifact_by_regex(
+    request: Request,
     x_authorization: Optional[str] = Header(None, alias="X-Authorization")
 ):
     """Search artifacts by regex (BASELINE)
@@ -559,8 +560,14 @@ def get_artifact_by_regex(
     if not username:
         raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
     
-    # Get regex pattern directly from the 'regex' field (per OpenAPI spec)
-    regex_pattern = regex_query.regex
+    # Parse JSON body manually to return 400 instead of 422
+    try:
+        body = await request.json()
+    except:
+        raise HTTPException(status_code=400, detail="There is missing field(s) in the artifact_regex or it is formed improperly, or is invalid")
+    
+    # Get regex pattern - accept both "regex" and "RegEx" 
+    regex_pattern = body.get("regex") or body.get("RegEx")
     if not regex_pattern:
         raise HTTPException(status_code=400, detail="There is missing field(s) in the artifact_regex or it is formed improperly, or is invalid")
     
