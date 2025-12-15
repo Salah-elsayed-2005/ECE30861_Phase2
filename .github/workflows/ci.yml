@@ -6,26 +6,32 @@ on:
   pull_request:
     branches: [ main, master ]
 
+# Allow Dependabot to run this workflow
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       # Setup Python for FastAPI backend
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
       # Setup Node.js for TypeScript components
       - name: Setup Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: '18'
+          cache: 'npm'
 
       # Install Python dependencies
       - name: Install Python dependencies
@@ -63,7 +69,7 @@ jobs:
 
       # Upload coverage reports
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v4
         with:
           files: ./coverage.xml
           flags: unittests
@@ -87,3 +93,23 @@ jobs:
               echo "✅ All test steps passed."
             fi
           } >> $GITHUB_STEP_SUMMARY
+
+  # Auto-merge Dependabot PRs for minor/patch updates when tests pass
+  dependabot-auto-merge:
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.actor == 'dependabot[bot]'
+    
+    steps:
+      - name: Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+      
+      - name: Auto-merge minor and patch updates
+        if: steps.metadata.outputs.update-type == 'version-update:semver-minor' || steps.metadata.outputs.update-type == 'version-update:semver-patch'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
