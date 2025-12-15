@@ -14,6 +14,7 @@ import uuid
 import os
 import jwt
 import boto3
+import json
 from decimal import Decimal
 
 # Import existing utilities and stores from routes.py
@@ -563,7 +564,7 @@ async def get_artifact_by_regex(
     # Parse JSON body manually to return 400 instead of 422
     try:
         body = await request.json()
-    except:
+    except Exception:
         raise HTTPException(status_code=400, detail="There is missing field(s) in the artifact_regex or it is formed improperly, or is invalid")
     
     # Get regex pattern - accept both "regex" and "RegEx" 
@@ -579,9 +580,6 @@ async def get_artifact_by_regex(
     
     # Fetch all artifacts
     all_artifacts = list(_list_artifacts())
-    
-    if not all_artifacts:
-        raise HTTPException(status_code=404, detail="No artifact found under this regex.")
     
     results = []
     
@@ -613,7 +611,8 @@ async def get_artifact_by_regex(
         if isinstance(metadata, str):
             try:
                 metadata = json.loads(metadata)
-            except Exception:
+            except Exception as e:
+                print(f"Error parsing metadata JSON: {e}")
                 metadata = {}
 
         if isinstance(metadata, dict):
