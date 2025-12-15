@@ -567,59 +567,49 @@ def get_artifact_by_regex(
     # Validate and compile regex pattern
     try:
         pattern = re.compile(regex_pattern, re.IGNORECASE)
-    except re.error as e:
+    except re.error:
         raise HTTPException(status_code=400, detail="There is missing field(s) in the artifact_regex or it is formed improperly, or is invalid")
     
-    # Fetch all artifacts first
+    # Fetch all artifacts
     all_artifacts = list(_list_artifacts())
     
-    # If no artifacts exist at all, return 404
     if not all_artifacts:
         raise HTTPException(status_code=404, detail="No artifact found under this regex.")
     
     results = []
-    seen_ids = set()
     
     for artifact_id, artifact in all_artifacts:
-        if artifact_id in seen_ids:
-            continue
-            
-        artifact_name = artifact.get("name", "") or ""
+        name = artifact.get("name", "")
         
-        # Get README content - check both top-level and nested in metadata
-        artifact_readme = artifact.get("readme", "") or ""
-        
-        # Handle metadata - could be dict, JSON string, or None
-        metadata = artifact.get("metadata", {})
-        if isinstance(metadata, str):
-            # If metadata is a JSON string, parse it
-            try:
-                import json as json_lib
-                metadata = json_lib.loads(metadata)
-            except:
-                metadata = {}
-        
-        if isinstance(metadata, dict):
-            metadata_readme = metadata.get("readme", "") or ""
-            if metadata_readme and not artifact_readme:
-                artifact_readme = metadata_readme
-        
-        # Search in name and readme per OpenAPI spec:
-        # "A regular expression over artifact names and READMEs"
-        name_match = pattern.search(artifact_name) if artifact_name else None
-        readme_match = pattern.search(artifact_readme) if artifact_readme else None
-        
-        if name_match or readme_match:
-            # Ensure type is lowercase per ArtifactType enum in spec
-            artifact_type = artifact.get("type", "model")
-            if isinstance(artifact_type, str):
-                artifact_type = artifact_type.lower()
+        # Check name match
+        if name and pattern.search(name):
             results.append({
-                "name": artifact_name,
+                "name": name,
                 "id": artifact_id,
-                "type": artifact_type
+                "type": artifact.get("type", "model").lower()
             })
-            seen_ids.add(artifact_id)
+            continue
+        
+        # Check README match (top-level)
+        readme = artifact.get("readme", "")
+        if readme and pattern.search(readme):
+            results.append({
+                "name": name,
+                "id": artifact_id,
+                "type": artifact.get("type", "model").lower()
+            })
+            continue
+        
+        # Check README inside metadata dict
+        metadata = artifact.get("metadata", {})
+        if isinstance(metadata, dict):
+            readme = metadata.get("readme", "")
+            if readme and pattern.search(readme):
+                results.append({
+                    "name": name,
+                    "id": artifact_id,
+                    "type": artifact.get("type", "model").lower()
+                })
     
     if not results:
         raise HTTPException(status_code=404, detail="No artifact found under this regex.")
