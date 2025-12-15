@@ -624,6 +624,7 @@ async def get_artifact_by_regex(
                     "type": artifact_type
                 })
     
+    
     if not results:
         raise HTTPException(status_code=404, detail="No artifact found under this regex.")
     
