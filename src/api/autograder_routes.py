@@ -70,29 +70,8 @@ class ArtifactQuery(BaseModel):
     types: Optional[List[str]] = None
 
 class ArtifactRegEx(BaseModel):
-    """Regex search request - OpenAPI spec uses lowercase 'regex' as required field
-    
-    However, autograder might send 'RegEx' (camelCase) so we handle both.
-    """
-    model_config = ConfigDict(populate_by_name=True, extra='allow')
-    # OpenAPI spec: field is 'regex' (lowercase, required)
-    # Also accept 'RegEx' via alias for compatibility
-    regex: Optional[str] = Field(default=None, alias="RegEx")
-    
-    def get_regex_pattern(self) -> Optional[str]:
-        """Get regex pattern from request body - handles various field names
-        
-        Priority:
-        1. 'regex' field (OpenAPI spec)
-        2. 'RegEx' field (autograder format)
-        3. Other variations in extra fields
-        """
-        # Primary: Check the 'regex' field (per OpenAPI spec)
-        if self.regex:
-            return self.regex
-        # Fallback: Check extra fields for other variations
-        extra_data = getattr(self, '__pydantic_extra__', {}) or {}
-        return extra_data.get('regex', None) or extra_data.get('RegEx', None) or extra_data.get('Regex', None)
+    """Regex search request - OpenAPI spec uses lowercase 'regex' as required field"""
+    regex: Optional[str] = None
 
 class User(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -580,8 +559,8 @@ def get_artifact_by_regex(
     if not username:
         raise HTTPException(status_code=403, detail="Authentication failed due to invalid or missing AuthenticationToken.")
     
-    # Get regex pattern - handles both 'regex' and 'RegEx' field names
-    regex_pattern = regex_query.get_regex_pattern()
+    # Get regex pattern directly from the 'regex' field (per OpenAPI spec)
+    regex_pattern = regex_query.regex
     if not regex_pattern:
         raise HTTPException(status_code=400, detail="There is missing field(s) in the artifact_regex or it is formed improperly, or is invalid")
     
