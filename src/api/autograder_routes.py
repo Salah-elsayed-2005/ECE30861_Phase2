@@ -34,19 +34,6 @@ app = FastAPI(
     description="API for ECE 461/Fall 2025/Project Phase 2: A Trustworthy Model Registry"
 )
 
-# ==================== Custom Exception Handler ====================
-# Convert Pydantic validation errors (422) to 400 per OpenAPI spec
-from fastapi.exceptions import RequestValidationError
-from starlette.exceptions import HTTPException as StarletteHTTPException
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request, exc):
-    """Convert 422 validation errors to 400 Bad Request per OpenAPI spec"""
-    return JSONResponse(
-        status_code=400,
-        content={"detail": "There is missing field(s) in the request or it is formed improperly, or is invalid"}
-    )
-
 # ==================== AWS Setup ====================
 try:
     dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
@@ -588,7 +575,6 @@ def get_artifact_by_regex(
     This is similar to search by name.
     """
     import re
-    import json as json_module
     
     username = _validate_token(x_authorization)
     if not username:
@@ -621,46 +607,37 @@ def get_artifact_by_regex(
             
         artifact_name = artifact.get("name", "") or ""
         
-        # Get README content - check multiple locations
+        # Get README content - check both top-level and nested in metadata
         artifact_readme = artifact.get("readme", "") or ""
         
-        # Also check if README is nested in metadata dict (like Team 18's structure)
+        # Handle metadata - could be dict, JSON string, or None
         metadata = artifact.get("metadata", {})
+        if isinstance(metadata, str):
+            # If metadata is a JSON string, parse it
+            try:
+                import json as json_lib
+                metadata = json_lib.loads(metadata)
+            except:
+                metadata = {}
+        
         if isinstance(metadata, dict):
             metadata_readme = metadata.get("readme", "") or ""
             if metadata_readme and not artifact_readme:
                 artifact_readme = metadata_readme
         
-        # Also search the description field
-        artifact_description = artifact.get("description", "") or ""
-        
-        # Also search the URL field
-        artifact_url = artifact.get("url", "") or ""
-        
-        # Convert full metadata to text for searching (like Team 18's metadata::text)
-        metadata_text = ""
-        if metadata:
-            try:
-                metadata_text = json_module.dumps(metadata) if isinstance(metadata, dict) else str(metadata)
-            except:
-                metadata_text = str(metadata)
-        
-        # Search in name, readme, description, url, and metadata text per OpenAPI spec:
+        # Search in name and readme per OpenAPI spec:
         # "A regular expression over artifact names and READMEs"
         name_match = pattern.search(artifact_name) if artifact_name else None
         readme_match = pattern.search(artifact_readme) if artifact_readme else None
-        description_match = pattern.search(artifact_description) if artifact_description else None
-        url_match = pattern.search(artifact_url) if artifact_url else None
-        metadata_match = pattern.search(metadata_text) if metadata_text else None
         
-        if name_match or readme_match or description_match or url_match or metadata_match:
+        if name_match or readme_match:
             # Ensure type is lowercase per ArtifactType enum in spec
             artifact_type = artifact.get("type", "model")
             if isinstance(artifact_type, str):
                 artifact_type = artifact_type.lower()
             results.append({
                 "name": artifact_name,
-                "id": str(artifact_id),  # Ensure ID is string per spec
+                "id": artifact_id,
                 "type": artifact_type
             })
             seen_ids.add(artifact_id)
