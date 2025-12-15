@@ -608,8 +608,14 @@ async def get_artifact_by_regex(
             })
             continue
         
-        # Check README inside metadata dict
+        # Check README inside metadata; metadata could be dict or JSON string
         metadata = artifact.get("metadata", {})
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except Exception:
+                metadata = {}
+
         if isinstance(metadata, dict):
             readme = metadata.get("readme", "")
             if readme and pattern.search(readme):
