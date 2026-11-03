@@ -16,3 +16,15 @@ venv/
 # Lambda deployment package and dependencies
 lambda_pkg/
 lambda_deployment.zip
+
+# Build and debugging output (repository cleanup)
+temp_*/
+lambda_check/
+lambda_verify/
+*.zip
+terraform.exe
+tfplan
+*.tfstate.lock.info
+*_logs.txt
+logs_out.txt
+raw_event.txt
